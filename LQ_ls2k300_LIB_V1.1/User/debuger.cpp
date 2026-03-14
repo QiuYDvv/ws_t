@@ -201,3 +201,9 @@ void StartDebuggerThreads(Serial& serial, volatile sig_atomic_t* exitFlag)
     std::thread motorThread(runSineSpeedTest, std::ref(serial), exitFlag);
     motorThread.detach();
 }
+
+void DebuggerUpdateAndDisplayImu(Imu& imu, uint8_t row, uint8_t col)
+{
+    if (imu.isInited() && imu.update())
+        imu.displayAttitude(row, col);
+}

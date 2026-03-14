@@ -57,6 +57,13 @@ public:
     // 使用龙邱库逐点绘制边线到 TFT（左蓝、右绿、中线红），各 3 像素宽，内部会 TFT_Flush
     void drawLineResultOnTFT(const LineSearchResult& result, int imgW, int imgH) const;
 
+    /**
+     * 一帧完整流程：采集 → 翻转 → 二值化 → 滤波 → 八邻域搜线 → 中线 → 显示二值图与边线。
+     * @return false 表示采集失败（调用方应 break 主循环）
+     */
+    bool grabProcessAndDisplayFrame(cv::Mat& gray, cv::Mat& binary, LineSearchResult& lineResult,
+                                   int outWidth, int outHeight, int searchType = 0);
+
 private:
     int deviceId_;
     cv::VideoCapture cap_;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <csignal>
+#include <cstdint>
 
 // 前向声明，避免 debuger 与主程序互相包含过多头文件
 class Serial;
@@ -20,3 +21,6 @@ void DebuggerSendSpeedToHost(Serial& serial,
 
 // 启动调试线程：命令接收线程 + 正弦速度闭环测试线程；exitFlag 由主程序在 SIGINT 时置 1，测试正常结束时置 0
 void StartDebuggerThreads(Serial& serial, volatile sig_atomic_t* exitFlag);
+
+// 读取 IMU 并显示解算姿态角到 TFT（R/P/Y：横滚/俯仰/航向，单位度），row/col 为显示位置
+void DebuggerUpdateAndDisplayImu(Imu& imu, uint8_t row = 0, uint8_t col = 2);

@@ -78,29 +78,11 @@ int main()
     // 主循环：在 main 中同时调用 camera 和 display；Ctrl+C 后也会退出
     while (cam.isOpened() && !g_exitRequested)
     {
-        // 采集原始分辨率图像
-        if (!cam.grabGrayFrame(gray, tft_w, tft_h))
-        {
+        if (!cam.grabProcessAndDisplayFrame(gray, binFull, lineResult, tft_w, tft_h, 0))
             break;
-        }
-
-        // 对原图做上下颠倒
-        cam.flipVertical(gray, gray);
-
-        // 使用 Camera 内部封装好的：下采样 + 帧间采样 + 大津二值化逻辑
-        cam.otsuBinarize(gray, binFull);
-        cam.pixelFilterErode(binFull);  // 二值化后、搜线前做腐蚀/像素滤波去噪
-        // 先显示二值化图像，再算中线，再用龙邱库逐点刷新边线（左蓝、右绿、中线红）
-        cam.searchLineEightNeighbor(binFull, lineResult, 0);
-        cam.calculateCenterLine(lineResult, tft_w, tft_h);
-        TFT_ShowFullGray8(binFull.data);
-        cam.drawLineResultOnTFT(lineResult, tft_w, tft_h);
 
         // 读取 IMU 并显示解算姿态角（R/P/Y：横滚/俯仰/航向，单位度）
-        if (imu.isInited() && imu.update())
-        {
-            imu.displayAttitude(0, 2);
-        }
+        DebuggerUpdateAndDisplayImu(imu);
 
         // 计算帧率并显示在屏幕左上角
         double fps = TFT_UpdateAndShowFps(cam);

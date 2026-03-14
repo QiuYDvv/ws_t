@@ -421,5 +421,20 @@ void Camera::drawLineResultOnTFT(const LineSearchResult& result, int imgW, int i
     TFT_Flush();
 }
 
+bool Camera::grabProcessAndDisplayFrame(cv::Mat& gray, cv::Mat& binary, LineSearchResult& lineResult,
+                                        int outWidth, int outHeight, int searchType)
+{
+    if (!grabGrayFrame(gray, outWidth, outHeight))
+        return false;
+    flipVertical(gray, gray);
+    otsuBinarize(gray, binary);
+    pixelFilterErode(binary);
+    searchLineEightNeighbor(binary, lineResult, searchType);
+    calculateCenterLine(lineResult, outWidth, outHeight);
+    TFT_ShowFullGray8(binary.data);
+    drawLineResultOnTFT(lineResult, outWidth, outHeight);
+    return true;
+}
+
 
 
