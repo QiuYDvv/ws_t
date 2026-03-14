@@ -32,11 +32,20 @@ public:
     /** 停止：左右轮速度置 0 */
     void stop();
 
+    /** 清空 PID 积分/微分状态并将目标速度归零 */
+    void resetPIDState();
+
+    /** 停机：输出占空比清零并关闭 PWM 使能 */
+    void shutdown();
+
     /** 设置最大占空比上限，用于限制最高速度（0 ~ PWM 周期） */
     void setMaxDuty(int maxDuty);
 
     /** 速度输出限幅：设定 [-maxOutput, maxOutput]，默认 100，可设为 80 等以保护电机 */
     void setMaxOutput(int maxOutput);
+
+    /** 每个控制周期允许的最大输出变化量，限制电流冲击与突变反转 */
+    void setRampStep(int rampStep);
 
     /** 是否已初始化 */
     bool isInited() const { return inited_; }
@@ -48,6 +57,10 @@ public:
     float getEncoderSpeedRight();
     /** 读取左右轮编码器速度到 out_left、out_right */
     void getEncoderSpeed(float& out_left, float& out_right);
+    /** 读取上一次闭环更新中缓存的速度反馈 */
+    void getLastMeasuredSpeed(float& out_left, float& out_right) const;
+    /** 读取当前真正输出到电机的百分比命令 */
+    void getAppliedOutput(int& out_left, int& out_right) const;
 
     // ---------- PID 闭环控速 ----------
     /** 设置 PID 参数（左右轮共用一组参数） */
@@ -67,6 +80,8 @@ public:
     void updateClosedLoop(double dt);
 
 private:
+    void applyRawSpeed(int left, int right);
+    int rampOutputToward(int targetSpeed, int currentSpeed) const;
     void setOneMotor(SetPWM& pwm, HWGpio& dir, int speed);
     void updateOnePID(float target, float actual, double dt,
                       float kp, float ki, float kd,
@@ -80,6 +95,7 @@ private:
     LS_PwmEncoder rightEncoder_;  // channel 3, GPIO 72
     int maxDuty_;
     int maxOutput_;  // 速度输出限幅 [-maxOutput_, maxOutput_]
+    int rampStep_;
     bool inited_;
 
     float kpL_, kiL_, kdL_;
@@ -87,4 +103,6 @@ private:
     float targetLeft_, targetRight_;
     float integralLeft_, integralRight_;
     float lastErrorLeft_, lastErrorRight_;
+    float lastMeasuredLeft_, lastMeasuredRight_;
+    int currentOutputLeft_, currentOutputRight_;
 };

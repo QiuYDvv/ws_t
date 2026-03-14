@@ -17,17 +17,26 @@ MotorController::MotorController()
     , rightEncoder_(3, 72)           // 右编码器：PWM 通道 3，方向 GPIO72
     , maxDuty_(DEFAULT_MAX_DUTY)
     , maxOutput_(100)                // 速度输出限幅，默认 ±100
+    , rampStep_(6)                   // 10ms 控制周期下每拍最多变化 6%，约 170ms 从 0 到满量程
     , inited_(false)
     , kpL_(0.1f), kiL_(0.0f), kdL_(0.0f)
     , kpR_(0.1f), kiR_(0.0f), kdR_(0.0f)
     , targetLeft_(0.0f), targetRight_(0.0f)
     , integralLeft_(0.0f), integralRight_(0.0f)
     , lastErrorLeft_(0.0f), lastErrorRight_(0.0f)
+    , lastMeasuredLeft_(0.0f), lastMeasuredRight_(0.0f)
+    , currentOutputLeft_(0), currentOutputRight_(0)
 {
 }
 
 void MotorController::init()
 {
+    if (inited_)
+    {
+        stop();
+        return;
+    }
+
     leftPWM_.Enable();
     rightPWM_.Enable();
     stop();
@@ -44,6 +53,26 @@ void MotorController::setMaxOutput(int maxOutput)
     maxOutput_ = std::max(1, std::min(100, maxOutput));
 }
 
+void MotorController::setRampStep(int rampStep)
+{
+    rampStep_ = std::max(1, std::min(100, rampStep));
+}
+
+int MotorController::rampOutputToward(int targetSpeed, int currentSpeed) const
+{
+    targetSpeed = std::max(-maxOutput_, std::min(maxOutput_, targetSpeed));
+
+    // 方向切换必须先回零，避免电机与驱动桥瞬间反向冲击。
+    if (targetSpeed != 0 && currentSpeed != 0 && ((targetSpeed > 0) != (currentSpeed > 0)))
+        targetSpeed = 0;
+
+    if (targetSpeed > currentSpeed + rampStep_)
+        return currentSpeed + rampStep_;
+    if (targetSpeed < currentSpeed - rampStep_)
+        return currentSpeed - rampStep_;
+    return targetSpeed;
+}
+
 void MotorController::setOneMotor(SetPWM& pwm, HWGpio& dir, int speed)
 {
     speed = std::max(-maxOutput_, std::min(maxOutput_, speed));
@@ -52,15 +81,46 @@ void MotorController::setOneMotor(SetPWM& pwm, HWGpio& dir, int speed)
     dir.SetGpioValue(speed >= 0 ? 1 : 0);
 }
 
-void MotorController::setSpeed(int left, int right)
+void MotorController::applyRawSpeed(int left, int right)
 {
     setOneMotor(leftPWM_, leftDir_, left);
     setOneMotor(rightPWM_, rightDir_, right);
 }
 
+void MotorController::setSpeed(int left, int right)
+{
+    currentOutputLeft_ = std::max(-maxOutput_, std::min(maxOutput_, left));
+    currentOutputRight_ = std::max(-maxOutput_, std::min(maxOutput_, right));
+    applyRawSpeed(currentOutputLeft_, currentOutputRight_);
+}
+
 void MotorController::stop()
 {
+    resetPIDState();
     setSpeed(0, 0);
+}
+
+void MotorController::resetPIDState()
+{
+    targetLeft_ = 0.0f;
+    targetRight_ = 0.0f;
+    integralLeft_ = 0.0f;
+    integralRight_ = 0.0f;
+    lastErrorLeft_ = 0.0f;
+    lastErrorRight_ = 0.0f;
+}
+
+void MotorController::shutdown()
+{
+    stop();
+    if (!inited_)
+        return;
+
+    leftPWM_.Disable();
+    rightPWM_.Disable();
+    leftPWM_.UnexportPWM();
+    rightPWM_.UnexportPWM();
+    inited_ = false;
 }
 
 // 编码器无脉冲时龙邱库会令 val=1，导致 100000000/1/512≈195000，PID 误判为极大速度并饱和输出
@@ -70,19 +130,35 @@ static constexpr float ENCODER_SPEED_INVALID_THRESHOLD = 2000.0f;
 float MotorController::getEncoderSpeedLeft()
 {
     float v = leftEncoder_.Update();
-    return (v > ENCODER_SPEED_INVALID_THRESHOLD || v < -ENCODER_SPEED_INVALID_THRESHOLD) ? 0.0f : v;
+    lastMeasuredLeft_ =
+        (v > ENCODER_SPEED_INVALID_THRESHOLD || v < -ENCODER_SPEED_INVALID_THRESHOLD) ? 0.0f : v;
+    return lastMeasuredLeft_;
 }
 
 float MotorController::getEncoderSpeedRight()
 {
     float v = rightEncoder_.Update();
-    return (v > ENCODER_SPEED_INVALID_THRESHOLD || v < -ENCODER_SPEED_INVALID_THRESHOLD) ? 0.0f : v;
+    lastMeasuredRight_ =
+        (v > ENCODER_SPEED_INVALID_THRESHOLD || v < -ENCODER_SPEED_INVALID_THRESHOLD) ? 0.0f : v;
+    return lastMeasuredRight_;
 }
 
 void MotorController::getEncoderSpeed(float& out_left, float& out_right)
 {
     out_left  = getEncoderSpeedLeft();
     out_right = getEncoderSpeedRight();
+}
+
+void MotorController::getLastMeasuredSpeed(float& out_left, float& out_right) const
+{
+    out_left = lastMeasuredLeft_;
+    out_right = lastMeasuredRight_;
+}
+
+void MotorController::getAppliedOutput(int& out_left, int& out_right) const
+{
+    out_left = currentOutputLeft_;
+    out_right = currentOutputRight_;
 }
 
 void MotorController::setPID(float kp, float ki, float kd)
@@ -146,10 +222,12 @@ void MotorController::updateClosedLoop(double dt)
     float actualLeft  = getEncoderSpeedLeft();
     float actualRight = getEncoderSpeedRight();
 
-    int leftSpeed  = 0;
-    int rightSpeed = 0;
-    updateOnePID(targetLeft_,  actualLeft,  dt, kpL_, kiL_, kdL_, integralLeft_,  lastErrorLeft_,  leftSpeed);
-    updateOnePID(targetRight_, actualRight, dt, kpR_, kiR_, kdR_, integralRight_, lastErrorRight_, rightSpeed);
+    int targetOutputLeft = 0;
+    int targetOutputRight = 0;
+    updateOnePID(targetLeft_,  actualLeft,  dt, kpL_, kiL_, kdL_, integralLeft_,  lastErrorLeft_,  targetOutputLeft);
+    updateOnePID(targetRight_, actualRight, dt, kpR_, kiR_, kdR_, integralRight_, lastErrorRight_, targetOutputRight);
 
-    setSpeed(leftSpeed, rightSpeed);
+    currentOutputLeft_ = rampOutputToward(targetOutputLeft, currentOutputLeft_);
+    currentOutputRight_ = rampOutputToward(targetOutputRight, currentOutputRight_);
+    applyRawSpeed(currentOutputLeft_, currentOutputRight_);
 }

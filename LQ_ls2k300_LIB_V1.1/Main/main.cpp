@@ -24,46 +24,77 @@ QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
 #include <termios.h>
 #include <csignal>
 #include <cstdio>
+#include <fstream>
+#include <string>
+#include <thread>
 
-// Ctrl+C 时置位，电机线程检测后 stop 并退出，从而析构 PWM 并 unexport，第二次运行才能重新 export
+// Ctrl+C 时置位，主循环与控制线程检测后主动停机并退出
 static volatile sig_atomic_t g_exitRequested = 0;
 static void onSigInt(int) { g_exitRequested = 1; }
+
+static void JoinThread(std::thread& thread)
+{
+    if (thread.joinable())
+        thread.join();
+}
+
+static bool IsKernelModuleLoaded(const char* moduleName)
+{
+    if (!moduleName || moduleName[0] == '\0')
+        return false;
+
+    std::ifstream modules("/proc/modules");
+    if (!modules.is_open())
+        return false;
+
+    std::string line;
+    const std::string prefix(moduleName);
+    while (std::getline(modules, line))
+    {
+        if (line.compare(0, prefix.size(), prefix) == 0 &&
+            (line.size() == prefix.size() || line[prefix.size()] == ' '))
+            return true;
+    }
+    return false;
+}
+
+static void LoadKernelModuleIfNeeded(const char* moduleName, const char* modulePath)
+{
+    if (!moduleName || !modulePath || IsKernelModuleLoaded(moduleName))
+        return;
+    std::string cmd = "insmod ";
+    cmd += modulePath;
+    std::system(cmd.c_str());
+}
 
 int main()
 {
 
     // 加载所需内核模块
-    std::system("insmod /lib/modules/4.19.190/TFT18_dri.ko");
-    std::system("insmod /lib/modules/4.19.190/TFT18_dev.ko");
-    std::system("insmod /lib/modules/4.19.190/LQ_MPU6050_dri.ko");
-    std::system("insmod /lib/modules/4.19.190/LQ_MPU6050_dev.ko");
+    LoadKernelModuleIfNeeded("TFT18_dri", "/lib/modules/4.19.190/TFT18_dri.ko");
+    LoadKernelModuleIfNeeded("TFT18_dev", "/lib/modules/4.19.190/TFT18_dev.ko");
+    LoadKernelModuleIfNeeded("LQ_MPU6050_dri", "/lib/modules/4.19.190/LQ_MPU6050_dri.ko");
+    LoadKernelModuleIfNeeded("LQ_MPU6050_dev", "/lib/modules/4.19.190/LQ_MPU6050_dev.ko");
 
     // 初始化 TFT（0：横屏）
     TFT_DisplayerInit(0);
 
     std::signal(SIGINT, onSigInt);
 
-    // 串口提前打开，用于正弦速度测试与主循环共用
-    Serial serial;
-    if (serial.open("/dev/ttyS1", B115200))
-        StartDebuggerThreads(serial, &g_exitRequested);
-
     // 打开摄像头（只负责图像采集与处理）
     Camera cam(0);
     if (!cam.open())
-    {
         return 1;
-    }
 
     // 初始化 IMU（MPU6050）
     Imu imu;
     imu.init();
 
-    // 串口已在前面打开；若未打开则重新打开（供主循环 VOFA+ 等使用）
-    if (!serial.isOpen() && !serial.open("/dev/ttyS1", B115200))
-        { /* 可选：记录打开失败 */ }
-    if (serial.isOpen())
-        DebuggerSendStr(serial, "main start\n");
+    // 串口在业务初始化完成后再打开，避免初始化失败时线程已经启动
+    Serial serial;
+    std::thread cmdThread, motorThread;
+    if (serial.open("/dev/ttyS1", B115200))
+        StartDebuggerThreads(serial, &g_exitRequested, &cmdThread, &motorThread);
 
     // 显示分辨率
     const int tft_w = TFT_DisplayerWidth();
@@ -72,8 +103,7 @@ int main()
     cv::Mat gray;        // 原始分辨率灰度图
     cv::Mat binFull;     // 原始分辨率二值图（用于显示）
     Camera::LineSearchResult lineResult;
-
-    int frameCount = 0;  // 用于串口发送节流
+    int frameCount = 0;  // 预留给 VOFA 调试发送节流
 
     // 主循环：在 main 中同时调用 camera 和 display；Ctrl+C 后也会退出
     while (cam.isOpened() && !g_exitRequested)
@@ -86,10 +116,15 @@ int main()
 
         // 计算帧率并显示在屏幕左上角
         double fps = TFT_UpdateAndShowFps(cam);
+        (void)fps;
 
         // VOFA+ JustFloat：每 period 帧发一帧浮点数据（FPS, R, P, Y）
         // DebuggerSendVofaIfNeeded(serial, frameCount, 15, fps, imu);
+        (void)frameCount;
     }
 
+    g_exitRequested = 1;
+    JoinThread(motorThread);
+    JoinThread(cmdThread);
     return 0;
 }

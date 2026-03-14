@@ -1,7 +1,36 @@
 #include "serial.h"
 #include "LQ_Uart.hpp"
 
+#include <cerrno>
 #include <cstring>
+#include <fcntl.h>
+#include <poll.h>
+
+namespace {
+
+struct UartLayout {
+    int uart_fd;
+    termios ts;
+    speed_t BaudRate;
+    uint8_t Stop;
+    uint8_t Data;
+    uint8_t Check;
+};
+
+static int GetValidUartFd(const LS_UART* uart)
+{
+    if (!uart)
+        return -1;
+
+    const UartLayout* layout = reinterpret_cast<const UartLayout*>(uart);
+    const int fd = layout->uart_fd;
+    if (fd < 0)
+        return -1;
+
+    return (fcntl(fd, F_GETFL) == -1) ? -1 : fd;
+}
+
+} // namespace
 
 Serial::~Serial()
 {
@@ -12,7 +41,13 @@ bool Serial::open(const std::string& device, speed_t baudrate)
 {
     close();
     // 直接调用龙邱库：LS_UART 带参构造函数完成打开与配置
-    uart_ = new LS_UART(device, baudrate, LS_UART_STOP1, LS_UART_DATA8, LS_UART_NONE);
+    LS_UART* candidate = new LS_UART(device, baudrate, LS_UART_STOP1, LS_UART_DATA8, LS_UART_NONE);
+    if (GetValidUartFd(candidate) < 0)
+    {
+        delete candidate;
+        return false;
+    }
+    uart_ = candidate;
     return true;
 }
 
@@ -49,6 +84,28 @@ int Serial::receive(char* buf, size_t maxLen)
 int Serial::receive(uint8_t* buf, size_t maxLen)
 {
     return receive(reinterpret_cast<char*>(buf), maxLen);
+}
+
+int Serial::nativeHandle() const
+{
+    return GetValidUartFd(uart_);
+}
+
+bool Serial::waitReadable(int timeoutMs) const
+{
+    struct pollfd pfd;
+    std::memset(&pfd, 0, sizeof(pfd));
+    pfd.fd = nativeHandle();
+    pfd.events = POLLIN;
+    if (pfd.fd < 0)
+        return false;
+
+    int ret;
+    do {
+        ret = poll(&pfd, 1, timeoutMs);
+    } while (ret < 0 && errno == EINTR);
+
+    return ret > 0 && (pfd.revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL));
 }
 
 int Serial::sendStr(const char* str)

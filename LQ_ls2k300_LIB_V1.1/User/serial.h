@@ -34,6 +34,12 @@ public:
     int receive(char* buf, size_t maxLen);
     int receive(uint8_t* buf, size_t maxLen);
 
+    // 获取底层串口 fd；失败返回 -1
+    int nativeHandle() const;
+
+    // 等待串口可读；超时或失败返回 false
+    bool waitReadable(int timeoutMs) const;
+
     // 发送字符串（不含结尾 '\0'）
     int sendStr(const char* str);
     int sendStr(const std::string& str);
