@@ -1,0 +1,25 @@
+# 构建产物
+build/
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.order
+.tmp_versions/
+Module.symvers
+modules.order
+
+# 可执行文件（可选，若需版本控制可删此行）
+# main
+
+# Windows/WSL 元数据
+*:Zone.Identifier
+*Zone.Identifier
+
+# 编辑器与系统
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

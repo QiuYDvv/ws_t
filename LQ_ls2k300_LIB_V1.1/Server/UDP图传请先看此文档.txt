@@ -1,0 +1,2 @@
+LQ_UDP_Camera_Sender.cpp为发送端（久久派），LQ_UDP_Camera_Receiver.cpp为接收端（windows）
+将LQ_UDP_Camera_Sender.cpp中的内容复制粘贴到main.cpp中即可编译使用
