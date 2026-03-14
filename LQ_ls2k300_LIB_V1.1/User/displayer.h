@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+// 前向声明，避免 displayer 与 camera 互相包含
+class Camera;
+
 // 简单封装：直接调用 LQ_TFT18_dri 提供的函数，不自己写底层驱动
 
 // 初始化 TFT，type = 0 横屏，1 竖屏
@@ -26,4 +29,7 @@ void TFT_Flush();
 
 // 在屏幕左上角显示一行文本（使用 6x8 字体）
 void TFT_ShowTextTopLeft(const char* text);
+
+// 计算帧率并在屏幕左上角显示，返回当前 FPS（内部调用 cam.updateFps()）
+double TFT_UpdateAndShowFps(Camera& cam);
 

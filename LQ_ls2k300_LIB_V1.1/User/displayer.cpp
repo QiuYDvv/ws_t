@@ -1,5 +1,7 @@
 #include "displayer.h"
+#include "camera.h"
 #include "LQ_TFT18_dri.hpp"
+#include <cstdio>
 
 // 初始化 TFT，type = 0 横屏，1 竖屏
 void TFT_DisplayerInit(uint8_t type)
@@ -59,5 +61,14 @@ void TFT_ShowTextTopLeft(const char* text)
 
     // 使用库提供的 6x8 字符串输出函数，在左上角(行0,列0)显示
     TFTSPI_dir_P6X8Str(0, 1, text, u16YELLOW, u16BLACK);
+}
+
+double TFT_UpdateAndShowFps(Camera& cam)
+{
+    double fps = cam.updateFps();
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "FPS: %.1f", fps);
+    TFT_ShowTextTopLeft(buf);
+    return fps;
 }
 

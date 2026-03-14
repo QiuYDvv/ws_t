@@ -54,6 +54,9 @@ public:
     // binary 为 CV_8UC1，0 黑 255 白；type 0 普通模式，1 斑马线模式（仅起始列不同）
     void searchLineEightNeighbor(const cv::Mat& binary, LineSearchResult& result, int type = 0) const;
 
+    // 使用龙邱库逐点绘制边线到 TFT（左蓝、右绿、中线红），各 3 像素宽，内部会 TFT_Flush
+    void drawLineResultOnTFT(const LineSearchResult& result, int imgW, int imgH) const;
+
 private:
     int deviceId_;
     cv::VideoCapture cap_;

@@ -1,6 +1,8 @@
 #include "camera.h"
+#include "displayer.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstdint>
 
 Camera::Camera(int deviceId)
     : deviceId_(deviceId)
@@ -380,6 +382,43 @@ void Camera::calculateCenterLine(LineSearchResult& result, int imgW, int imgH) c
             result.offset += weights[idx] * (result.center_x[static_cast<size_t>(y)] - mid);
     }
     result.offset = result.offset / 2.0;
+}
+
+void Camera::drawLineResultOnTFT(const LineSearchResult& result, int imgW, int imgH) const
+{
+    static constexpr uint16_t RGB565_BLUE  = 0x001F;
+    static constexpr uint16_t RGB565_GREEN = 0x07E0;
+    static constexpr uint16_t RGB565_RED   = 0xF800;
+    const int halfW = 1;
+
+    for (int y = 0; y < imgH; y++)
+    {
+        int lx = result.left_x[static_cast<size_t>(y)];
+        int rx = result.right_x[static_cast<size_t>(y)];
+        for (int dx = -halfW; dx <= halfW; dx++)
+        {
+            int xl = lx + dx;
+            if (xl >= 0 && xl < imgW)
+                TFT_DrawPixel(static_cast<uint8_t>(xl), static_cast<uint8_t>(y), RGB565_BLUE);
+            if (rx != lx)
+            {
+                int xr = rx + dx;
+                if (xr >= 0 && xr < imgW)
+                    TFT_DrawPixel(static_cast<uint8_t>(xr), static_cast<uint8_t>(y), RGB565_GREEN);
+            }
+        }
+        if (y >= 10 && y < static_cast<int>(result.center_x.size()))
+        {
+            int mx = static_cast<int>(result.center_x[static_cast<size_t>(y)] + 0.5);
+            for (int dx = -halfW; dx <= halfW; dx++)
+            {
+                int xm = mx + dx;
+                if (xm >= 0 && xm < imgW)
+                    TFT_DrawPixel(static_cast<uint8_t>(xm), static_cast<uint8_t>(y), RGB565_RED);
+            }
+        }
+    }
+    TFT_Flush();
 }
 
 
