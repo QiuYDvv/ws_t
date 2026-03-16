@@ -10,12 +10,22 @@ constexpr int MotorController::DEFAULT_MAX_DUTY;
 
 namespace {
 
-// 交换左右电机输出映射，编码器归属保持不变。
+// 电机/编码器软件校准：
+// 1. 左电机实际方向与逻辑命令相反，因此对左电机输出取反；
+// 2. 如有接线换边，可打开左右输出交换；
+// 3. 编码器符号保持与逻辑速度同向。
+constexpr int kLeftMotorOutputSign = -1;
+constexpr int kRightMotorOutputSign = 1;
 constexpr bool kSwapMotorOutputChannels = false;
 constexpr float kLeftEncoderSign = 1.0f;
 constexpr float kRightEncoderSign = 1.0f;
 
 static float ApplyEncoderSign(float value, float sign)
+{
+    return value * sign;
+}
+
+static int ApplyMotorOutputSign(int value, int sign)
 {
     return value * sign;
 }
@@ -97,15 +107,18 @@ void MotorController::setOneMotor(SetPWM& pwm, HWGpio& dir, int speed)
 
 void MotorController::applyRawSpeed(int left, int right)
 {
+    const int leftOutput = ApplyMotorOutputSign(left, kLeftMotorOutputSign);
+    const int rightOutput = ApplyMotorOutputSign(right, kRightMotorOutputSign);
+
     if (kSwapMotorOutputChannels)
     {
-        setOneMotor(rightPWM_, rightDir_, left);
-        setOneMotor(leftPWM_, leftDir_, right);
+        setOneMotor(rightPWM_, rightDir_, leftOutput);
+        setOneMotor(leftPWM_, leftDir_, rightOutput);
         return;
     }
 
-    setOneMotor(leftPWM_, leftDir_, left);
-    setOneMotor(rightPWM_, rightDir_, right);
+    setOneMotor(leftPWM_, leftDir_, leftOutput);
+    setOneMotor(rightPWM_, rightDir_, rightOutput);
 }
 
 void MotorController::setSpeed(int left, int right)
