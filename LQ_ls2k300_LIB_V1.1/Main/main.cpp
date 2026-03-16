@@ -23,6 +23,7 @@ QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
 #include "serial.h"
 #include <termios.h>
 #include <csignal>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -36,6 +37,28 @@ static void JoinThread(std::thread& thread)
 {
     if (thread.joinable())
         thread.join();
+}
+
+static void ImuUpdateThread(Imu* imu, volatile sig_atomic_t* exitFlag)
+{
+    if (!imu || !exitFlag)
+        return;
+
+    const std::chrono::microseconds period(2000); // 500Hz 解算线程
+    std::chrono::steady_clock::time_point nextWake = std::chrono::steady_clock::now();
+
+    while (!(*exitFlag))
+    {
+        if (imu->isInited())
+            imu->update();
+
+        nextWake += period;
+        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+        if (nextWake > now)
+            std::this_thread::sleep_until(nextWake);
+        else
+            nextWake = now;
+    }
 }
 
 static bool IsKernelModuleLoaded(const char* moduleName)
@@ -88,7 +111,10 @@ int main()
 
     // 初始化 IMU（MPU6050）
     Imu imu;
-    imu.init();
+    const bool imuReady = imu.init();
+    std::thread imuThread;
+    if (imuReady)
+        imuThread = std::thread(ImuUpdateThread, &imu, &g_exitRequested);
 
     // 串口在业务初始化完成后再打开，避免初始化失败时线程已经启动
     Serial serial;
@@ -111,8 +137,8 @@ int main()
         if (!cam.grabProcessAndDisplayFrame(gray, binFull, lineResult, tft_w, tft_h, 0))
             break;
 
-        // 读取 IMU 并显示解算姿态角（R/P/Y：横滚/俯仰/航向，单位度）
-        DebuggerUpdateAndDisplayImu(imu);
+        // IMU 在独立线程中更新，主线程只显示当前姿态角。
+        DebuggerDisplayImu(imu);
         DebuggerPrintPidIfChanged();
         DebuggerPrintMotorStateIfChanged();
 
@@ -126,6 +152,7 @@ int main()
     }
 
     g_exitRequested = 1;
+    JoinThread(imuThread);
     JoinThread(motorThread);
     JoinThread(cmdThread);
     return 0;

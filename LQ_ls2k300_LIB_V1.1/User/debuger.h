@@ -40,5 +40,5 @@ void DebuggerPrintPidIfChanged();
 // 若电机运行状态或目标速度相对上次调用发生变化，则在终端打印当前状态
 void DebuggerPrintMotorStateIfChanged();
 
-// 读取 IMU 并显示解算姿态角到 TFT（R/P/Y：横滚/俯仰/航向，单位度），row/col 为显示位置
-void DebuggerUpdateAndDisplayImu(Imu& imu, uint8_t row = 0, uint8_t col = 2);
+// 显示 IMU 当前姿态角到 TFT（R/P/Y：横滚/俯仰/航向，单位度），row/col 为显示位置
+void DebuggerDisplayImu(const Imu& imu, uint8_t row = 0, uint8_t col = 2);

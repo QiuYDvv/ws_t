@@ -643,8 +643,8 @@ void DebuggerPrintMotorStateIfChanged()
     lastTargetR = snapshot.targetR;
 }
 
-void DebuggerUpdateAndDisplayImu(Imu& imu, uint8_t row, uint8_t col)
+void DebuggerDisplayImu(const Imu& imu, uint8_t row, uint8_t col)
 {
-    if (imu.isInited() && imu.update())
+    if (imu.isInited())
         imu.displayAttitude(row, col);
 }
