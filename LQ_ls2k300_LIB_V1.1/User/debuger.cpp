@@ -77,10 +77,10 @@ static void ResetSharedState()
     g_sharedState.faultActive = false;
     g_sharedState.manualTargetL = 0.0f;
     g_sharedState.manualTargetR = 0.0f;
-    g_sharedState.kpL = 1.0f;
+    g_sharedState.kpL = 0.1f;
     g_sharedState.kiL = 0.0f;
     g_sharedState.kdL = 0.0f;
-    g_sharedState.kpR = 1.0f;
+    g_sharedState.kpR = 0.1f;
     g_sharedState.kiR = 0.0f;
     g_sharedState.kdR = 0.0f;
 }
@@ -115,6 +115,29 @@ static void LatchFaultStopLocked()
 {
     ApplyStopCommandLocked();
     g_sharedState.faultActive = true;
+}
+
+static const char* DescribeMotorMotion(const ControlSnapshot& snapshot)
+{
+    if (snapshot.faultActive)
+        return "fault_stop";
+    if (!snapshot.running || IsStopTarget(snapshot.targetL, snapshot.targetR))
+        return "stopped";
+    if (snapshot.useSineTarget)
+        return "sine";
+
+    const bool leftForward = snapshot.targetL > kStopTargetEpsilon;
+    const bool leftReverse = snapshot.targetL < -kStopTargetEpsilon;
+    const bool rightForward = snapshot.targetR > kStopTargetEpsilon;
+    const bool rightReverse = snapshot.targetR < -kStopTargetEpsilon;
+
+    if (leftForward && rightForward)
+        return "forward";
+    if (leftReverse && rightReverse)
+        return "reverse";
+    if ((leftForward && rightReverse) || (leftReverse && rightForward))
+        return "spin";
+    return "differential";
 }
 
 static void HandleCommandLine(const char* line)
@@ -221,7 +244,8 @@ static void HandleCommandLine(const char* line)
 
 static void MaybeSendSpeedTelemetry(Serial* serial, int& telemetryCounter,
                                     float targetLeft, float targetRight,
-                                    float actualLeft, float actualRight)
+                                    float actualLeft, float actualRight,
+                                    float pwmLeft, float pwmRight)
 {
     if (!serial || !serial->isOpen())
         return;
@@ -231,7 +255,7 @@ static void MaybeSendSpeedTelemetry(Serial* serial, int& telemetryCounter,
         return;
 
     telemetryCounter = 0;
-    DebuggerSendSpeedToHost(*serial, targetLeft, targetRight, actualLeft, actualRight);
+    DebuggerSendSpeedToHost(*serial, targetLeft, targetRight, actualLeft, actualRight, pwmLeft, pwmRight);
 }
 
 static void CommandReceiverThread(Serial* serial, volatile sig_atomic_t* exitFlag)
@@ -253,6 +277,7 @@ static void CommandReceiverThread(Serial* serial, volatile sig_atomic_t* exitFla
                 if (idleWaitMs >= kCommandFlushTimeoutMs)
                 {
                     lineBuf[lineLen] = '\0';
+                    DebuggerEchoCommand(*serial, lineBuf);
                     HandleCommandLine(lineBuf);
                     lineLen = 0;
                     idleWaitMs = 0;
@@ -274,7 +299,10 @@ static void CommandReceiverThread(Serial* serial, volatile sig_atomic_t* exitFla
             {
                 lineBuf[lineLen] = '\0';
                 if (lineLen > 0)
+                {
+                    DebuggerEchoCommand(*serial, lineBuf);
                     HandleCommandLine(lineBuf);
+                }
                 lineLen = 0;
                 idleWaitMs = 0;
                 continue;
@@ -303,10 +331,10 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
     bool wasRunning = false;
     bool wasSineTarget = false;
     bool wasFaultActive = false;
-    float appliedKpL = 1.0f;
+    float appliedKpL = 0.1f;
     float appliedKiL = 0.0f;
     float appliedKdL = 0.0f;
-    float appliedKpR = 1.0f;
+    float appliedKpR = 0.1f;
     float appliedKiR = 0.0f;
     float appliedKdR = 0.0f;
     int stallCounterLeft = 0;
@@ -348,8 +376,12 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 
             float actualL = 0.0f;
             float actualR = 0.0f;
+            int appliedOutL = 0;
+            int appliedOutR = 0;
             motor->getEncoderSpeed(actualL, actualR);
-            MaybeSendSpeedTelemetry(serial, telemetryCounter, 0.0f, 0.0f, actualL, actualR);
+            motor->getAppliedOutput(appliedOutL, appliedOutR);
+            MaybeSendSpeedTelemetry(serial, telemetryCounter, 0.0f, 0.0f, actualL, actualR,
+                                    static_cast<float>(appliedOutL), static_cast<float>(appliedOutR));
 
             wasRunning = false;
             wasSineTarget = false;
@@ -371,9 +403,13 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 
             float actualL = 0.0f;
             float actualR = 0.0f;
+            int appliedOutL = 0;
+            int appliedOutR = 0;
             motor->getEncoderSpeed(actualL, actualR);
+            motor->getAppliedOutput(appliedOutL, appliedOutR);
             MaybeSendSpeedTelemetry(serial, telemetryCounter, snapshot.targetL, snapshot.targetR,
-                                    actualL, actualR);
+                                    actualL, actualR,
+                                    static_cast<float>(appliedOutL), static_cast<float>(appliedOutR));
 
             wasRunning = false;
             wasSineTarget = false;
@@ -441,7 +477,8 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
         }
 
         MaybeSendSpeedTelemetry(serial, telemetryCounter, snapshot.targetL, snapshot.targetR,
-                                actualL, actualR);
+                                actualL, actualR,
+                                static_cast<float>(appliedOutL), static_cast<float>(appliedOutR));
 
         wasRunning = true;
         wasSineTarget = snapshot.useSineTarget;
@@ -450,7 +487,7 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 
     motor->shutdown();
     if (serial && serial->isOpen())
-        DebuggerSendSpeedToHost(*serial, 0.0f, 0.0f, 0.0f, 0.0f);
+        DebuggerSendSpeedToHost(*serial, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 } // namespace
@@ -461,6 +498,16 @@ void DebuggerSendStr(Serial& serial, const char* str)
         return;
     std::lock_guard<std::mutex> lock(g_serialTxMutex);
     serial.sendStr(str);
+}
+
+void DebuggerEchoCommand(Serial& serial, const char* line)
+{
+    if (!line || line[0] == '\0')
+        return;
+
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "cmd: %s\n", line);
+    DebuggerSendStr(serial, buf);
 }
 
 void DebuggerSendVofaIfNeeded(Serial& serial, int& frameCount, int period,
@@ -480,13 +527,14 @@ void DebuggerSendVofaIfNeeded(Serial& serial, int& frameCount, int period,
 
 void DebuggerSendSpeedToHost(Serial& serial,
                              float targetLeft, float targetRight,
-                             float actualLeft, float actualRight)
+                             float actualLeft, float actualRight,
+                             float pwmLeft, float pwmRight)
 {
     if (!serial.isOpen())
         return;
-    float vofa[4] = { targetLeft, targetRight, actualLeft, actualRight };
+    float vofa[6] = { targetLeft, targetRight, actualLeft, actualRight, pwmLeft, pwmRight };
     std::lock_guard<std::mutex> lock(g_serialTxMutex);
-    serial.sendVofaJustFloat(vofa, 4);
+    serial.sendVofaJustFloat(vofa, 6);
 }
 
 void StartDebuggerThreads(Serial& serial, volatile sig_atomic_t* exitFlag,
@@ -501,6 +549,98 @@ void StartDebuggerThreads(Serial& serial, volatile sig_atomic_t* exitFlag,
         *outCmdThread = std::thread(CommandReceiverThread, &serial, exitFlag);
     if (outMotorThread)
         *outMotorThread = std::thread(MotorControlThread, &serial, exitFlag);
+}
+
+void DebuggerPrintPidIfChanged()
+{
+    const ControlSnapshot snapshot = SnapshotSharedState();
+
+    static bool initialized = false;
+    static float lastKpL = 0.0f;
+    static float lastKiL = 0.0f;
+    static float lastKdL = 0.0f;
+    static float lastKpR = 0.0f;
+    static float lastKiR = 0.0f;
+    static float lastKdR = 0.0f;
+
+    if (!initialized)
+    {
+        lastKpL = snapshot.kpL;
+        lastKiL = snapshot.kiL;
+        lastKdL = snapshot.kdL;
+        lastKpR = snapshot.kpR;
+        lastKiR = snapshot.kiR;
+        lastKdR = snapshot.kdR;
+        initialized = true;
+        return;
+    }
+
+    if (snapshot.kpL == lastKpL && snapshot.kiL == lastKiL && snapshot.kdL == lastKdL &&
+        snapshot.kpR == lastKpR && snapshot.kiR == lastKiR && snapshot.kdR == lastKdR)
+    {
+        return;
+    }
+
+    std::printf("PID updated: L(%.4f, %.4f, %.4f) R(%.4f, %.4f, %.4f)\n",
+                snapshot.kpL, snapshot.kiL, snapshot.kdL,
+                snapshot.kpR, snapshot.kiR, snapshot.kdR);
+    std::fflush(stdout);
+
+    lastKpL = snapshot.kpL;
+    lastKiL = snapshot.kiL;
+    lastKdL = snapshot.kdL;
+    lastKpR = snapshot.kpR;
+    lastKiR = snapshot.kiR;
+    lastKdR = snapshot.kdR;
+}
+
+void DebuggerPrintMotorStateIfChanged()
+{
+    const ControlSnapshot snapshot = SnapshotSharedState();
+
+    static bool initialized = false;
+    static bool lastRunning = false;
+    static bool lastUseSineTarget = false;
+    static bool lastFaultActive = false;
+    static float lastTargetL = 0.0f;
+    static float lastTargetR = 0.0f;
+
+    if (!initialized)
+    {
+        lastRunning = snapshot.running;
+        lastUseSineTarget = snapshot.useSineTarget;
+        lastFaultActive = snapshot.faultActive;
+        lastTargetL = snapshot.targetL;
+        lastTargetR = snapshot.targetR;
+        initialized = true;
+        return;
+    }
+
+    const bool stateChanged =
+        snapshot.running != lastRunning ||
+        snapshot.useSineTarget != lastUseSineTarget ||
+        snapshot.faultActive != lastFaultActive ||
+        snapshot.targetL != lastTargetL ||
+        snapshot.targetR != lastTargetR;
+    if (!stateChanged)
+        return;
+
+    if (snapshot.useSineTarget)
+    {
+        std::printf("Motor state: %s\n", DescribeMotorMotion(snapshot));
+    }
+    else
+    {
+        std::printf("Motor state: %s, targetL=%.2f, targetR=%.2f\n",
+                    DescribeMotorMotion(snapshot), snapshot.targetL, snapshot.targetR);
+    }
+    std::fflush(stdout);
+
+    lastRunning = snapshot.running;
+    lastUseSineTarget = snapshot.useSineTarget;
+    lastFaultActive = snapshot.faultActive;
+    lastTargetL = snapshot.targetL;
+    lastTargetR = snapshot.targetR;
 }
 
 void DebuggerUpdateAndDisplayImu(Imu& imu, uint8_t row, uint8_t col)

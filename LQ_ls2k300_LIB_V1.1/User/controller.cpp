@@ -8,6 +8,20 @@
 constexpr int MotorController::DEFAULT_PWM_CYCLE;
 constexpr int MotorController::DEFAULT_MAX_DUTY;
 
+namespace {
+
+// 交换左右电机输出映射，编码器归属保持不变。
+constexpr bool kSwapMotorOutputChannels = false;
+constexpr float kLeftEncoderSign = 1.0f;
+constexpr float kRightEncoderSign = 1.0f;
+
+static float ApplyEncoderSign(float value, float sign)
+{
+    return value * sign;
+}
+
+} // namespace
+
 MotorController::MotorController()
     : leftPWM_(PWM1, DEFAULT_PWM_CYCLE, 0, "inversed")
     , rightPWM_(PWM2, DEFAULT_PWM_CYCLE, 0, "inversed")
@@ -19,8 +33,8 @@ MotorController::MotorController()
     , maxOutput_(100)                // 速度输出限幅，默认 ±100
     , rampStep_(6)                   // 10ms 控制周期下每拍最多变化 6%，约 170ms 从 0 到满量程
     , inited_(false)
-    , kpL_(0.1f), kiL_(0.0f), kdL_(0.0f)
-    , kpR_(0.1f), kiR_(0.0f), kdR_(0.0f)
+    , kpL_(2.4f), kiL_(0.2f), kdL_(0.0f)
+    , kpR_(2.4f), kiR_(0.2f), kdR_(0.0f)
     , targetLeft_(0.0f), targetRight_(0.0f)
     , integralLeft_(0.0f), integralRight_(0.0f)
     , lastErrorLeft_(0.0f), lastErrorRight_(0.0f)
@@ -83,6 +97,13 @@ void MotorController::setOneMotor(SetPWM& pwm, HWGpio& dir, int speed)
 
 void MotorController::applyRawSpeed(int left, int right)
 {
+    if (kSwapMotorOutputChannels)
+    {
+        setOneMotor(rightPWM_, rightDir_, left);
+        setOneMotor(leftPWM_, leftDir_, right);
+        return;
+    }
+
     setOneMotor(leftPWM_, leftDir_, left);
     setOneMotor(rightPWM_, rightDir_, right);
 }
@@ -129,7 +150,7 @@ static constexpr float ENCODER_SPEED_INVALID_THRESHOLD = 2000.0f;
 
 float MotorController::getEncoderSpeedLeft()
 {
-    float v = leftEncoder_.Update();
+    float v = ApplyEncoderSign(leftEncoder_.Update(), kLeftEncoderSign);
     lastMeasuredLeft_ =
         (v > ENCODER_SPEED_INVALID_THRESHOLD || v < -ENCODER_SPEED_INVALID_THRESHOLD) ? 0.0f : v;
     return lastMeasuredLeft_;
@@ -137,7 +158,7 @@ float MotorController::getEncoderSpeedLeft()
 
 float MotorController::getEncoderSpeedRight()
 {
-    float v = rightEncoder_.Update();
+    float v = ApplyEncoderSign(rightEncoder_.Update(), kRightEncoderSign);
     lastMeasuredRight_ =
         (v > ENCODER_SPEED_INVALID_THRESHOLD || v < -ENCODER_SPEED_INVALID_THRESHOLD) ? 0.0f : v;
     return lastMeasuredRight_;
@@ -209,7 +230,7 @@ void MotorController::updateOnePID(float target, float actual, double dt,
     float derivative = (dt > 1e-9f) ? static_cast<float>((error - lastError) / dt) : 0.0f;
     lastError = error;
 
-    const float maxIntegral = 500.0f;
+    const float maxIntegral = 100.0f;
     integral = std::max(-maxIntegral, std::min(maxIntegral, integral));
 
     float out = kp * error + ki * integral + kd * derivative;

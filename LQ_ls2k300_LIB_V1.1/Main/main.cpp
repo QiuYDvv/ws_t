@@ -113,6 +113,8 @@ int main()
 
         // 读取 IMU 并显示解算姿态角（R/P/Y：横滚/俯仰/航向，单位度）
         DebuggerUpdateAndDisplayImu(imu);
+        DebuggerPrintPidIfChanged();
+        DebuggerPrintMotorStateIfChanged();
 
         // 计算帧率并显示在屏幕左上角
         double fps = TFT_UpdateAndShowFps(cam);
