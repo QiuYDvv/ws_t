@@ -40,11 +40,11 @@ struct SharedDebuggerState {
     bool faultActive = false;
     float manualTargetL = 0.0f;
     float manualTargetR = 0.0f;
-    float kpL = 0.1f;
-    float kiL = 0.0f;
+    float kpL = 2.4f;
+    float kiL = 0.2f;
     float kdL = 0.0f;
-    float kpR = 0.1f;
-    float kiR = 0.0f;
+    float kpR = 2.4f;
+    float kiR = 0.2f;
     float kdR = 0.0f;
 };
 
@@ -54,11 +54,11 @@ struct ControlSnapshot {
     bool faultActive = false;
     float targetL = 0.0f;
     float targetR = 0.0f;
-    float kpL = 0.1f;
-    float kiL = 0.0f;
+    float kpL = 2.4f;
+    float kiL = 0.2f;
     float kdL = 0.0f;
-    float kpR = 0.1f;
-    float kiR = 0.0f;
+    float kpR = 2.4f;
+    float kiR = 0.2f;
     float kdR = 0.0f;
 };
 
@@ -77,11 +77,11 @@ static void ResetSharedState()
     g_sharedState.faultActive = false;
     g_sharedState.manualTargetL = 0.0f;
     g_sharedState.manualTargetR = 0.0f;
-    g_sharedState.kpL = 0.1f;
-    g_sharedState.kiL = 0.0f;
+    g_sharedState.kpL = 2.4f;
+    g_sharedState.kiL = 0.2f;
     g_sharedState.kdL = 0.0f;
-    g_sharedState.kpR = 0.1f;
-    g_sharedState.kiR = 0.0f;
+    g_sharedState.kpR = 2.4f;
+    g_sharedState.kiR = 0.2f;
     g_sharedState.kdR = 0.0f;
 }
 
@@ -331,11 +331,11 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
     bool wasRunning = false;
     bool wasSineTarget = false;
     bool wasFaultActive = false;
-    float appliedKpL = 0.1f;
-    float appliedKiL = 0.0f;
+    float appliedKpL = 2.4f;
+    float appliedKiL = 0.2f;
     float appliedKdL = 0.0f;
-    float appliedKpR = 0.1f;
-    float appliedKiR = 0.0f;
+    float appliedKpR = 2.4f;
+    float appliedKiR = 0.2f;
     float appliedKdR = 0.0f;
     int stallCounterLeft = 0;
     int stallCounterRight = 0;
@@ -376,12 +376,12 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 
             float actualL = 0.0f;
             float actualR = 0.0f;
-            int appliedOutL = 0;
-            int appliedOutR = 0;
+            float appliedOutL = 0.0f;
+            float appliedOutR = 0.0f;
             motor->getEncoderSpeed(actualL, actualR);
             motor->getAppliedOutput(appliedOutL, appliedOutR);
             MaybeSendSpeedTelemetry(serial, telemetryCounter, 0.0f, 0.0f, actualL, actualR,
-                                    static_cast<float>(appliedOutL), static_cast<float>(appliedOutR));
+                                    appliedOutL, appliedOutR);
 
             wasRunning = false;
             wasSineTarget = false;
@@ -403,13 +403,13 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 
             float actualL = 0.0f;
             float actualR = 0.0f;
-            int appliedOutL = 0;
-            int appliedOutR = 0;
+            float appliedOutL = 0.0f;
+            float appliedOutR = 0.0f;
             motor->getEncoderSpeed(actualL, actualR);
             motor->getAppliedOutput(appliedOutL, appliedOutR);
             MaybeSendSpeedTelemetry(serial, telemetryCounter, snapshot.targetL, snapshot.targetR,
                                     actualL, actualR,
-                                    static_cast<float>(appliedOutL), static_cast<float>(appliedOutR));
+                                    appliedOutL, appliedOutR);
 
             wasRunning = false;
             wasSineTarget = false;
@@ -435,8 +435,8 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 
         float actualL = 0.0f;
         float actualR = 0.0f;
-        int appliedOutL = 0;
-        int appliedOutR = 0;
+        float appliedOutL = 0.0f;
+        float appliedOutR = 0.0f;
         motor->getLastMeasuredSpeed(actualL, actualR);
         motor->getAppliedOutput(appliedOutL, appliedOutR);
 
@@ -444,11 +444,11 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
         {
             const bool leftStalled =
                 std::fabs(snapshot.targetL) >= kStallTargetThreshold &&
-                std::abs(appliedOutL) >= kStallOutputThreshold &&
+                std::fabs(appliedOutL) >= kStallOutputThreshold &&
                 std::fabs(actualL) <= kStallSpeedThreshold;
             const bool rightStalled =
                 std::fabs(snapshot.targetR) >= kStallTargetThreshold &&
-                std::abs(appliedOutR) >= kStallOutputThreshold &&
+                std::fabs(appliedOutR) >= kStallOutputThreshold &&
                 std::fabs(actualR) <= kStallSpeedThreshold;
 
             stallCounterLeft = leftStalled ? (stallCounterLeft + 1) : 0;
@@ -478,7 +478,7 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 
         MaybeSendSpeedTelemetry(serial, telemetryCounter, snapshot.targetL, snapshot.targetR,
                                 actualL, actualR,
-                                static_cast<float>(appliedOutL), static_cast<float>(appliedOutR));
+                                appliedOutL, appliedOutR);
 
         wasRunning = true;
         wasSineTarget = snapshot.useSineTarget;
@@ -532,9 +532,9 @@ void DebuggerSendSpeedToHost(Serial& serial,
 {
     if (!serial.isOpen())
         return;
-    float vofa[6] = { targetLeft, targetRight, actualLeft, actualRight, pwmLeft, pwmRight };
+    float vofa[4] = { targetLeft, targetRight, actualLeft, actualRight };
     std::lock_guard<std::mutex> lock(g_serialTxMutex);
-    serial.sendVofaJustFloat(vofa, 6);
+    serial.sendVofaJustFloat(vofa, 4);
 }
 
 void StartDebuggerThreads(Serial& serial, volatile sig_atomic_t* exitFlag,

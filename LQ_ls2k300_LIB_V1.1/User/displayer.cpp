@@ -63,6 +63,22 @@ void TFT_ShowTextTopLeft(const char* text)
     TFTSPI_dir_P6X8Str(0, 1, text, u16YELLOW, u16BLACK);
 }
 
+void TFT_ShowTextBottomLeft(const char* text, uint8_t lineFromBottom)
+{
+    if (text == nullptr)
+        return;
+
+    const uint8_t textRows = static_cast<uint8_t>(TFT18H / 8);
+    if (textRows == 0)
+        return;
+
+    uint8_t y = static_cast<uint8_t>(textRows - 1);
+    if (lineFromBottom < textRows)
+        y = static_cast<uint8_t>(textRows - 1 - lineFromBottom);
+
+    TFTSPI_dir_P6X8Str(0, y, text, u16YELLOW, u16BLACK);
+}
+
 double TFT_UpdateAndShowFps(Camera& cam)
 {
     double fps = cam.updateFps();
@@ -71,4 +87,3 @@ double TFT_UpdateAndShowFps(Camera& cam)
     TFT_ShowTextTopLeft(buf);
     return fps;
 }
-

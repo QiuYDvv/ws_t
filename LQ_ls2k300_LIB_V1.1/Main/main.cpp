@@ -129,12 +129,13 @@ int main()
     cv::Mat gray;        // 原始分辨率灰度图
     cv::Mat binFull;     // 原始分辨率二值图（用于显示）
     Camera::LineSearchResult lineResult;
+    Camera::TrackElementResult trackResult;
     int frameCount = 0;  // 预留给 VOFA 调试发送节流
 
     // 主循环：在 main 中同时调用 camera 和 display；Ctrl+C 后也会退出
     while (cam.isOpened() && !g_exitRequested)
     {
-        if (!cam.grabProcessAndDisplayFrame(gray, binFull, lineResult, tft_w, tft_h, 0))
+        if (!cam.grabProcessAndDisplayFrame(gray, binFull, lineResult, trackResult, tft_w, tft_h, 0))
             break;
 
         // IMU 在独立线程中更新，主线程只显示当前姿态角。

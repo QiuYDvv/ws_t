@@ -30,6 +30,8 @@ void TFT_Flush();
 // 在屏幕左上角显示一行文本（使用 6x8 字体）
 void TFT_ShowTextTopLeft(const char* text);
 
+// 在屏幕左下角显示一行文本（lineFromBottom = 0 表示最底下一行）
+void TFT_ShowTextBottomLeft(const char* text, uint8_t lineFromBottom = 0);
+
 // 计算帧率并在屏幕左上角显示，返回当前 FPS（内部调用 cam.updateFps()）
 double TFT_UpdateAndShowFps(Camera& cam);
-

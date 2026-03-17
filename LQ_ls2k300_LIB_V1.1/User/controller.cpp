@@ -25,10 +25,14 @@ static float ApplyEncoderSign(float value, float sign)
     return value * sign;
 }
 
-static int ApplyMotorOutputSign(int value, int sign)
+template <typename T>
+static T ApplyMotorOutputSign(T value, int sign)
 {
-    return value * sign;
+    return value * static_cast<T>(sign);
 }
+
+constexpr float kOutputZeroEpsilon = 0.05f;
+constexpr float kFilteredSpeedSnapEpsilon = 0.2f;
 
 } // namespace
 
@@ -40,16 +44,20 @@ MotorController::MotorController()
     , leftEncoder_(0, 73)            // 左编码器：PWM 通道 0，方向 GPIO73（与 LQ_Encoder_Demo 一致）
     , rightEncoder_(3, 72)           // 右编码器：PWM 通道 3，方向 GPIO72
     , maxDuty_(DEFAULT_MAX_DUTY)
+    , minStartDuty_(1)
     , maxOutput_(100)                // 速度输出限幅，默认 ±100
     , rampStep_(6)                   // 10ms 控制周期下每拍最多变化 6%，约 170ms 从 0 到满量程
     , inited_(false)
+    , speedFilterAlpha_(0.25f)       // 一阶低通，抑制低速瞬时测速跳变
     , kpL_(2.4f), kiL_(0.2f), kdL_(0.0f)
     , kpR_(2.4f), kiR_(0.2f), kdR_(0.0f)
     , targetLeft_(0.0f), targetRight_(0.0f)
     , integralLeft_(0.0f), integralRight_(0.0f)
     , lastErrorLeft_(0.0f), lastErrorRight_(0.0f)
     , lastMeasuredLeft_(0.0f), lastMeasuredRight_(0.0f)
-    , currentOutputLeft_(0), currentOutputRight_(0)
+    , currentOutputLeft_(0.0f), currentOutputRight_(0.0f)
+    , appliedOutputLeft_(0.0f), appliedOutputRight_(0.0f)
+    , lastAppliedDutyLeft_(0), lastAppliedDutyRight_(0)
 {
 }
 
@@ -82,49 +90,83 @@ void MotorController::setRampStep(int rampStep)
     rampStep_ = std::max(1, std::min(100, rampStep));
 }
 
-int MotorController::rampOutputToward(int targetSpeed, int currentSpeed) const
+float MotorController::rampOutputToward(float targetSpeed, float currentSpeed) const
 {
-    targetSpeed = std::max(-maxOutput_, std::min(maxOutput_, targetSpeed));
+    const float maxOutput = static_cast<float>(maxOutput_);
+    const float rampStep = static_cast<float>(rampStep_);
+    targetSpeed = std::max(-maxOutput, std::min(maxOutput, targetSpeed));
 
     // 方向切换必须先回零，避免电机与驱动桥瞬间反向冲击。
-    if (targetSpeed != 0 && currentSpeed != 0 && ((targetSpeed > 0) != (currentSpeed > 0)))
-        targetSpeed = 0;
+    if (std::fabs(targetSpeed) > kOutputZeroEpsilon &&
+        std::fabs(currentSpeed) > kOutputZeroEpsilon &&
+        ((targetSpeed > 0) != (currentSpeed > 0)))
+    {
+        targetSpeed = 0.0f;
+    }
 
-    if (targetSpeed > currentSpeed + rampStep_)
-        return currentSpeed + rampStep_;
-    if (targetSpeed < currentSpeed - rampStep_)
-        return currentSpeed - rampStep_;
-    return targetSpeed;
+    float nextSpeed = targetSpeed;
+    if (targetSpeed > currentSpeed + rampStep)
+        nextSpeed = currentSpeed + rampStep;
+    else if (targetSpeed < currentSpeed - rampStep)
+        nextSpeed = currentSpeed - rampStep;
+
+    return (std::fabs(nextSpeed) < kOutputZeroEpsilon && std::fabs(targetSpeed) < kOutputZeroEpsilon)
+               ? 0.0f
+               : nextSpeed;
 }
 
-void MotorController::setOneMotor(SetPWM& pwm, HWGpio& dir, int speed)
+float MotorController::setOneMotor(SetPWM& pwm, HWGpio& dir, float speed, int& lastAppliedDuty)
 {
-    speed = std::max(-maxOutput_, std::min(maxOutput_, speed));
-    int duty = (std::abs(speed) * maxDuty_) / 100;
+    const float maxOutput = static_cast<float>(maxOutput_);
+    speed = std::max(-maxOutput, std::min(maxOutput, speed));
+    dir.SetGpioValue(speed >= 0.0f ? 1 : 0);
+
+    if (maxDuty_ <= 0 || std::fabs(speed) < kOutputZeroEpsilon)
+    {
+        pwm.SetDutyCycle(0);
+        lastAppliedDuty = 0;
+        return 0.0f;
+    }
+
+    const float dutyFloat = std::fabs(speed) * static_cast<float>(maxDuty_) / maxOutput;
+    int duty = static_cast<int>(std::round(dutyFloat));
+    duty = std::max(0, std::min(maxDuty_, duty));
+
+    const int minStartDuty = std::max(0, std::min(minStartDuty_, maxDuty_));
+    if (lastAppliedDuty == 0 && duty > 0 && duty < minStartDuty)
+        duty = minStartDuty;
+
     pwm.SetDutyCycle(duty);
-    dir.SetGpioValue(speed >= 0 ? 1 : 0);
+    lastAppliedDuty = duty;
+
+    const float appliedSpeed = static_cast<float>(duty) * maxOutput / static_cast<float>(maxDuty_);
+    return speed >= 0.0f ? appliedSpeed : -appliedSpeed;
 }
 
-void MotorController::applyRawSpeed(int left, int right)
+void MotorController::applyRawSpeed(float left, float right)
 {
-    const int leftOutput = ApplyMotorOutputSign(left, kLeftMotorOutputSign);
-    const int rightOutput = ApplyMotorOutputSign(right, kRightMotorOutputSign);
+    const float leftOutput = ApplyMotorOutputSign(left, kLeftMotorOutputSign);
+    const float rightOutput = ApplyMotorOutputSign(right, kRightMotorOutputSign);
 
     if (kSwapMotorOutputChannels)
     {
-        setOneMotor(rightPWM_, rightDir_, leftOutput);
-        setOneMotor(leftPWM_, leftDir_, rightOutput);
+        const float appliedLeftPhysical = setOneMotor(rightPWM_, rightDir_, leftOutput, lastAppliedDutyLeft_);
+        const float appliedRightPhysical = setOneMotor(leftPWM_, leftDir_, rightOutput, lastAppliedDutyRight_);
+        appliedOutputLeft_ = ApplyMotorOutputSign(appliedLeftPhysical, kLeftMotorOutputSign);
+        appliedOutputRight_ = ApplyMotorOutputSign(appliedRightPhysical, kRightMotorOutputSign);
         return;
     }
 
-    setOneMotor(leftPWM_, leftDir_, leftOutput);
-    setOneMotor(rightPWM_, rightDir_, rightOutput);
+    const float appliedLeftPhysical = setOneMotor(leftPWM_, leftDir_, leftOutput, lastAppliedDutyLeft_);
+    const float appliedRightPhysical = setOneMotor(rightPWM_, rightDir_, rightOutput, lastAppliedDutyRight_);
+    appliedOutputLeft_ = ApplyMotorOutputSign(appliedLeftPhysical, kLeftMotorOutputSign);
+    appliedOutputRight_ = ApplyMotorOutputSign(appliedRightPhysical, kRightMotorOutputSign);
 }
 
 void MotorController::setSpeed(int left, int right)
 {
-    currentOutputLeft_ = std::max(-maxOutput_, std::min(maxOutput_, left));
-    currentOutputRight_ = std::max(-maxOutput_, std::min(maxOutput_, right));
+    currentOutputLeft_ = static_cast<float>(std::max(-maxOutput_, std::min(maxOutput_, left)));
+    currentOutputRight_ = static_cast<float>(std::max(-maxOutput_, std::min(maxOutput_, right)));
     applyRawSpeed(currentOutputLeft_, currentOutputRight_);
 }
 
@@ -163,18 +205,12 @@ static constexpr float ENCODER_SPEED_INVALID_THRESHOLD = 2000.0f;
 
 float MotorController::getEncoderSpeedLeft()
 {
-    float v = ApplyEncoderSign(leftEncoder_.Update(), kLeftEncoderSign);
-    lastMeasuredLeft_ =
-        (v > ENCODER_SPEED_INVALID_THRESHOLD || v < -ENCODER_SPEED_INVALID_THRESHOLD) ? 0.0f : v;
-    return lastMeasuredLeft_;
+    return readFilteredEncoderSpeed(leftEncoder_, kLeftEncoderSign, lastMeasuredLeft_);
 }
 
 float MotorController::getEncoderSpeedRight()
 {
-    float v = ApplyEncoderSign(rightEncoder_.Update(), kRightEncoderSign);
-    lastMeasuredRight_ =
-        (v > ENCODER_SPEED_INVALID_THRESHOLD || v < -ENCODER_SPEED_INVALID_THRESHOLD) ? 0.0f : v;
-    return lastMeasuredRight_;
+    return readFilteredEncoderSpeed(rightEncoder_, kRightEncoderSign, lastMeasuredRight_);
 }
 
 void MotorController::getEncoderSpeed(float& out_left, float& out_right)
@@ -189,10 +225,23 @@ void MotorController::getLastMeasuredSpeed(float& out_left, float& out_right) co
     out_right = lastMeasuredRight_;
 }
 
-void MotorController::getAppliedOutput(int& out_left, int& out_right) const
+float MotorController::readFilteredEncoderSpeed(LS_PwmEncoder& encoder, float sign, float& lastMeasured)
 {
-    out_left = currentOutputLeft_;
-    out_right = currentOutputRight_;
+    float v = ApplyEncoderSign(encoder.Update(), sign);
+    float validSpeed =
+        (v > ENCODER_SPEED_INVALID_THRESHOLD || v < -ENCODER_SPEED_INVALID_THRESHOLD) ? 0.0f : v;
+
+    lastMeasured += speedFilterAlpha_ * (validSpeed - lastMeasured);
+    if (std::fabs(validSpeed) < kOutputZeroEpsilon && std::fabs(lastMeasured) < kFilteredSpeedSnapEpsilon)
+        lastMeasured = 0.0f;
+
+    return lastMeasured;
+}
+
+void MotorController::getAppliedOutput(float& out_left, float& out_right) const
+{
+    out_left = appliedOutputLeft_;
+    out_right = appliedOutputRight_;
 }
 
 void MotorController::setPID(float kp, float ki, float kd)
@@ -236,7 +285,7 @@ void MotorController::setTargetSpeed(float target_left, float target_right)
 
 void MotorController::updateOnePID(float target, float actual, double dt,
                                    float kp, float ki, float kd,
-                                   float& integral, float& lastError, int& outSpeed)
+                                   float& integral, float& lastError, float& outSpeed)
 {
     float error = target - actual;
     integral += error * static_cast<float>(dt);
@@ -247,8 +296,8 @@ void MotorController::updateOnePID(float target, float actual, double dt,
     integral = std::max(-maxIntegral, std::min(maxIntegral, integral));
 
     float out = kp * error + ki * integral + kd * derivative;
-    outSpeed = static_cast<int>(std::round(out));
-    outSpeed = std::max(-maxOutput_, std::min(maxOutput_, outSpeed));
+    const float maxOutput = static_cast<float>(maxOutput_);
+    outSpeed = std::max(-maxOutput, std::min(maxOutput, out));
 }
 
 void MotorController::updateClosedLoop(double dt)
@@ -256,8 +305,8 @@ void MotorController::updateClosedLoop(double dt)
     float actualLeft  = getEncoderSpeedLeft();
     float actualRight = getEncoderSpeedRight();
 
-    int targetOutputLeft = 0;
-    int targetOutputRight = 0;
+    float targetOutputLeft = 0.0f;
+    float targetOutputRight = 0.0f;
     updateOnePID(targetLeft_,  actualLeft,  dt, kpL_, kiL_, kdL_, integralLeft_,  lastErrorLeft_,  targetOutputLeft);
     updateOnePID(targetRight_, actualRight, dt, kpR_, kiR_, kdR_, integralRight_, lastErrorRight_, targetOutputRight);
 

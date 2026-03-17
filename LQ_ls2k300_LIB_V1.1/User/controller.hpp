@@ -59,8 +59,8 @@ public:
     void getEncoderSpeed(float& out_left, float& out_right);
     /** 读取上一次闭环更新中缓存的速度反馈 */
     void getLastMeasuredSpeed(float& out_left, float& out_right) const;
-    /** 读取当前真正输出到电机的百分比命令 */
-    void getAppliedOutput(int& out_left, int& out_right) const;
+    /** 读取当前真正输出到电机的百分比命令（含量化/最小启动占空比后的实际值） */
+    void getAppliedOutput(float& out_left, float& out_right) const;
 
     // ---------- PID 闭环控速 ----------
     /** 设置 PID 参数（左右轮共用一组参数） */
@@ -80,12 +80,13 @@ public:
     void updateClosedLoop(double dt);
 
 private:
-    void applyRawSpeed(int left, int right);
-    int rampOutputToward(int targetSpeed, int currentSpeed) const;
-    void setOneMotor(SetPWM& pwm, HWGpio& dir, int speed);
+    void applyRawSpeed(float left, float right);
+    float rampOutputToward(float targetSpeed, float currentSpeed) const;
+    float setOneMotor(SetPWM& pwm, HWGpio& dir, float speed, int& lastAppliedDuty);
+    float readFilteredEncoderSpeed(LS_PwmEncoder& encoder, float sign, float& lastMeasured);
     void updateOnePID(float target, float actual, double dt,
                       float kp, float ki, float kd,
-                      float& integral, float& lastError, int& outSpeed);
+                      float& integral, float& lastError, float& outSpeed);
 
     SetPWM leftPWM_;
     SetPWM rightPWM_;
@@ -94,9 +95,11 @@ private:
     LS_PwmEncoder leftEncoder_;   // channel 0, GPIO 73（与 LQ_Encoder_Demo 一致）
     LS_PwmEncoder rightEncoder_;  // channel 3, GPIO 72
     int maxDuty_;
+    int minStartDuty_;  // 静止起步时的最小占空比，避免命令太小只抖不转
     int maxOutput_;  // 速度输出限幅 [-maxOutput_, maxOutput_]
     int rampStep_;
     bool inited_;
+    float speedFilterAlpha_;
 
     float kpL_, kiL_, kdL_;
     float kpR_, kiR_, kdR_;
@@ -104,5 +107,7 @@ private:
     float integralLeft_, integralRight_;
     float lastErrorLeft_, lastErrorRight_;
     float lastMeasuredLeft_, lastMeasuredRight_;
-    int currentOutputLeft_, currentOutputRight_;
+    float currentOutputLeft_, currentOutputRight_;
+    float appliedOutputLeft_, appliedOutputRight_;
+    int lastAppliedDutyLeft_, lastAppliedDutyRight_;
 };
