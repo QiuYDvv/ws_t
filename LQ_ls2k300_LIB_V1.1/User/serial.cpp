@@ -1,3 +1,5 @@
+// 串口模块实现：
+// 通过龙邱 LS_UART 完成串口打开/收发，并补充 poll 等待与 VOFA JustFloat 发送能力。
 #include "serial.h"
 #include "LQ_Uart.hpp"
 
@@ -8,6 +10,8 @@
 
 namespace {
 
+// 由于 LS_UART 未暴露文件描述符接口，这里按当前库布局做只读解释，
+// 仅用于 waitReadable/nativeHandle 这类底层轮询需求。
 struct UartLayout {
     int uart_fd;
     termios ts;
@@ -32,6 +36,7 @@ static int GetValidUartFd(const LS_UART* uart)
 
 } // namespace
 
+// 析构时自动释放底层串口对象，避免 fd 泄漏。
 Serial::~Serial()
 {
     close();
@@ -101,6 +106,7 @@ bool Serial::waitReadable(int timeoutMs) const
         return false;
 
     int ret;
+    // 被信号打断时重试，避免调试线程在 Ctrl+C 或其他信号下误判超时。
     do {
         ret = poll(&pfd, 1, timeoutMs);
     } while (ret < 0 && errno == EINTR);
@@ -124,6 +130,7 @@ int Serial::sendVofaJustFloat(const float* data, int count)
 {
     if (!uart_ || !data || count <= 0)
         return -1;
+
     // JustFloat 格式：小端 float 数组 + 帧尾 0x00 0x00 0x80 0x7f（+Inf，小端）
     const uint8_t tail[4] = { 0x00, 0x00, 0x80, 0x7f };
     ssize_t n1 = uart_->WriteData(reinterpret_cast<const char*>(data), count * sizeof(float));

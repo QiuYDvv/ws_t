@@ -1,3 +1,5 @@
+// IMU 模块实现：
+// 负责 MPU6050 原始数据读取、陀螺仪零偏标定、四元数积分以及姿态角显示。
 #include "imu.h"
 #include "LQ_TFT18_dri.hpp"
 
@@ -6,6 +8,7 @@
 #include <ctime>
 #include <unistd.h>
 
+// 下面这一组访问器都通过互斥锁读取共享状态，保证 IMU 线程与显示线程并发安全。
 int16_t Imu::ax() const
 {
     std::lock_guard<std::mutex> lock(stateMutex_);
@@ -72,6 +75,7 @@ bool Imu::init(const std::string& devPath)
     if (inited_)
         return true;
 
+    // 初始化 I2C 设备并清空姿态解算状态。
     if (dev_.I2C_Init(devPath) != 0)
     {
         std::printf("IMU I2C_Init failed, path=%s\n", devPath.c_str());
@@ -107,6 +111,7 @@ bool Imu::update()
     if (!inited_ || !biasReady_)
         return false;
 
+    // 从底层驱动读取当前一帧加速度与陀螺仪原始值。
     int16_t ax = 0;
     int16_t ay = 0;
     int16_t az = 0;
@@ -138,6 +143,7 @@ bool Imu::update()
     if (dtSec > kMaxDtSec)
         dtSec = kMaxDtSec;
 
+    // 解算流程采用“读数 -> 补偿 -> 过滤 -> 四元数积分 -> 欧拉角更新”的固定顺序。
     // 第一步：读取陀螺仪原始角速度，并统一转换为 rad/s。
     const Vec3 omegaRaw = {
         rawGyroToRadPerSec(gx_),
@@ -201,6 +207,7 @@ bool Imu::calibrateGyroBias()
     return true;
 }
 
+// 使用单调时钟，避免系统时间被修改导致 dt 倒退。
 uint64_t Imu::nowUs() const
 {
     struct timespec ts;
@@ -216,6 +223,7 @@ double Imu::rawGyroToRadPerSec(int16_t raw) const
     return static_cast<double>(raw) * kGyroScaleRadPerSecPerLsb;
 }
 
+// 死区处理用于抑制静止时的微小零偏抖动，减少姿态慢漂。
 Imu::Vec3 Imu::applyDeadband(const Vec3& omega) const
 {
     Vec3 out = omega;
@@ -228,6 +236,7 @@ Imu::Vec3 Imu::applyDeadband(const Vec3& omega) const
     return out;
 }
 
+// 简单一阶低通，优先压制角速度高频噪声。
 Imu::Vec3 Imu::lowPassFilter(const Vec3& omega, double dtSec)
 {
     if (!filterReady_)
@@ -249,6 +258,7 @@ Imu::Vec3 Imu::lowPassFilter(const Vec3& omega, double dtSec)
     return gyroFilteredRad_;
 }
 
+// 用增量四元数积分而不是直接积分欧拉角，可减少姿态耦合误差。
 void Imu::integrateQuaternion(const Vec3& omega, double dtSec)
 {
     // q_dot = 0.5 * q ⊗ [0, wx, wy, wz]
@@ -282,6 +292,7 @@ void Imu::integrateQuaternion(const Vec3& omega, double dtSec)
     };
 }
 
+// 每次积分后都做归一化，避免累计数值误差破坏单位四元数约束。
 void Imu::normalizeQuaternion()
 {
     const double norm = std::sqrt(attitude_.w * attitude_.w + attitude_.x * attitude_.x +
@@ -299,6 +310,7 @@ void Imu::normalizeQuaternion()
     attitude_.z *= invNorm;
 }
 
+// 将内部四元数姿态投影为更便于调试显示的欧拉角。
 void Imu::updateEulerFromQuaternion()
 {
     const double sinrCosp = 2.0 * (attitude_.w * attitude_.x + attitude_.y * attitude_.z);
@@ -312,6 +324,7 @@ void Imu::updateEulerFromQuaternion()
     yawDeg_ = wrapAngleDeg(std::atan2(sinyCosp, cosyCosp) * kRadToDeg);
 }
 
+// clamp/wrapAngleDeg 是欧拉角转换阶段用到的通用数学辅助函数。
 double Imu::clamp(double value, double minValue, double maxValue)
 {
     if (value < minValue)
@@ -330,6 +343,7 @@ double Imu::wrapAngleDeg(double angleDeg)
     return angleDeg;
 }
 
+// 以 6x8 字体将当前姿态角打印到 TFT，便于现场快速确认解算输出。
 void Imu::displayAttitude(uint8_t row, uint8_t col) const
 {
     std::lock_guard<std::mutex> lock(stateMutex_);

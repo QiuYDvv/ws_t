@@ -4,6 +4,9 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 
+// 摄像头模块公共接口：
+// 负责采集图像、二值化、搜线、元素识别/处理，并向主流程输出中线与偏差结果。
+
 // 摄像头图像采集与处理封装类（只做图像获取和处理，不负责屏幕显示）
 class Camera
 {
@@ -123,6 +126,11 @@ public:
         bool straight_detected = false;
         bool bend_detected = false;
         int bend_direction = 0; // -1 左弯，1 右弯，0 未知/近直
+        int straight_factor = 0;
+        bool outside_protected = false;
+        int roundabout_stage = 0;
+        int fork_stage = 0;
+        int cross_stage = 0;
     };
 
     // 车库/补线工具结果：尽量保留原工程里的变量命名，便于后续移植
@@ -149,8 +157,8 @@ public:
     void drawLineResultOnTFT(const LineSearchResult& result, int imgW, int imgH) const;
 
     // 赛道元素检测入口：内部先检测斑马线/环岛，并更新结果结构体
-    void detectTrackElements(const cv::Mat& binary, const LineSearchResult& lineResult,
-                             TrackElementResult& result) const;
+    void detectTrackElements(const cv::Mat& binary, LineSearchResult& lineResult,
+                             TrackElementResult& result);
 
     // 按原 check_cheku 逻辑检测斑马线
     void detectZebraCrossing(const cv::Mat& binary, TrackElementResult& result,
@@ -172,7 +180,7 @@ public:
 
     // 元素识别主逻辑
     void Element_Test(const cv::Mat& binary, const LineSearchResult& lineResult,
-                      TrackElementResult& result) const;
+                      TrackElementResult& result);
 
     // 判断丢线行位置和数目：type 1 左，2 右
     void Diuxian_weizhi_test(uint8_t type, int startline, int endline,
@@ -217,6 +225,46 @@ public:
                                     int outWidth, int outHeight, int searchType = 0);
 
 private:
+    // 赛道元素持久化状态：
+    // 与 TrackElementResult 的“当前帧结果”不同，这里保存跨帧的状态机状态。
+    struct RoadTypeState
+    {
+        bool straight = false;
+        bool bend = false;
+        bool Ramp = false;
+        bool Cross = false;
+        bool L_Cross = false;
+        bool R_Cross = false;
+        bool LeftCirque = false;
+        bool RightCirque = false;
+        bool Fork = false;
+        bool Barn_l_out = false;
+        bool Barn_r_out = false;
+        bool Barn_l_in = false;
+        bool Barn_r_in = false;
+    };
+
+    void initializeLineTool(const LineSearchResult& lineResult, int imgW, int imgH);
+    void calculateCenterLineWithSupplement(LineSearchResult& result, int imgW, int imgH) const;
+    void syncRoadStateToResult(TrackElementResult& result) const;
+    void Check_Zhidao(const LineSearchResult& lineResult, TrackElementResult& result);
+    void Mid_Col(const cv::Mat& binary, TrackElementResult& result) const;
+    void Outside_protect(const cv::Mat& binary, const LineSearchResult& lineResult,
+                         TrackElementResult& result) const;
+    bool Tututu(uint8_t type, const LineSearchResult& lineResult, int imgW) const;
+    void Element_Handle(LineSearchResult& lineResult, TrackElementResult& result);
+    void Handle_Left_Cirque(LineSearchResult& lineResult, TrackElementResult& result);
+    void Handle_Right_Cirque(LineSearchResult& lineResult, TrackElementResult& result);
+    void Handle_Fork(LineSearchResult& lineResult, TrackElementResult& result);
+    void Handle_L_Cross(LineSearchResult& lineResult, TrackElementResult& result);
+    void Handle_R_Cross(LineSearchResult& lineResult, TrackElementResult& result);
+    void Handle_Cross(LineSearchResult& lineResult, TrackElementResult& result);
+    void Handle_Barn_in(uint8_t type, LineSearchResult& lineResult, TrackElementResult& result);
+    void Check_Cross_Guaidian(uint8_t type, const LineSearchResult& lineResult);
+    void Clear_Supplement_Lines(LineSearchResult& lineResult);
+    int TrackWidthAt(int y, int imgW, int imgH) const;
+    int EstimateDistanceMeasure(const LineSearchResult& lineResult) const;
+
     int deviceId_;
     cv::VideoCapture cap_;
 
@@ -228,4 +276,27 @@ private:
     mutable double otsuThresh_ = 0.0;
     mutable int otsuFrameCount_ = 0;
     mutable bool otsuInited_ = false;
+
+    RoadTypeState roadType_;
+    LineToolResult lineToolResult_;
+    bool pauseCameraProcess_ = false;
+    bool disableElementDetection_ = false;
+    bool inCarHahaMode_ = false;
+    bool pushedBoxInRoundabout_ = false;
+    int huandaoStage_ = 1;
+    int sanchaStage_ = 1;
+    int leftCrossStage_ = 1;
+    int rightCrossStage_ = 1;
+    int crossStage_ = 1;
+    int passBarn_ = 1;
+    int closeCheckKuS_ = 0;
+    int jinkuS_ = 0;
+    int annulusS1_ = 0;
+    int forkS1_ = 0;
+    int forkS2_ = 0;
+    int crossS_ = 0;
+    int sanchaXBest_ = 0;
+    int sanchaYBest_ = 0;
+    std::array<int, 2> crossLeft_ { 0, 0 };
+    std::array<int, 2> crossRight_ { 0, 0 };
 };

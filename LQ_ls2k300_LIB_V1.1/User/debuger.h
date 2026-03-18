@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <thread>
 
+// 调试模块公共接口：
+// 统一管理串口调试输出、命令接收线程、电机测试线程，以及 IMU/TFT 联调显示。
+
 // 前向声明，避免 debuger 与主程序互相包含过多头文件
 class Serial;
 class Imu;

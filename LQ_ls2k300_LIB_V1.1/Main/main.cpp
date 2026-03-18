@@ -15,6 +15,8 @@
 @注意事项：注意查看路径的修改
 QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ*/
 
+// 主程序入口：
+// 负责平台初始化、设备打开、后台线程启动，以及驱动 camera/imu/debugger 的主循环。
 #include "main.hpp"
 #include "camera.h"
 #include "debuger.h"
@@ -33,12 +35,15 @@ QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
 static volatile sig_atomic_t g_exitRequested = 0;
 static void onSigInt(int) { g_exitRequested = 1; }
 
+// 统一封装 join，避免主流程里重复写 joinable 判定。
 static void JoinThread(std::thread& thread)
 {
     if (thread.joinable())
         thread.join();
 }
 
+// IMU 更新线程：
+// 按固定周期调用 Imu::update，让姿态解算与主显示循环解耦。
 static void ImuUpdateThread(Imu* imu, volatile sig_atomic_t* exitFlag)
 {
     if (!imu || !exitFlag)
@@ -61,6 +66,7 @@ static void ImuUpdateThread(Imu* imu, volatile sig_atomic_t* exitFlag)
     }
 }
 
+// 通过 /proc/modules 判断驱动是否已加载，避免重复 insmod。
 static bool IsKernelModuleLoaded(const char* moduleName)
 {
     if (!moduleName || moduleName[0] == '\0')
@@ -81,6 +87,7 @@ static bool IsKernelModuleLoaded(const char* moduleName)
     return false;
 }
 
+// 仅在驱动未加载时执行 insmod，减少无意义的系统调用与错误输出。
 static void LoadKernelModuleIfNeeded(const char* moduleName, const char* modulePath)
 {
     if (!moduleName || !modulePath || IsKernelModuleLoaded(moduleName))
@@ -92,7 +99,7 @@ static void LoadKernelModuleIfNeeded(const char* moduleName, const char* moduleP
 
 int main()
 {
-
+    // -------------------- 平台初始化 --------------------
     // 加载所需内核模块
     LoadKernelModuleIfNeeded("TFT18_dri", "/lib/modules/4.19.190/TFT18_dri.ko");
     LoadKernelModuleIfNeeded("TFT18_dev", "/lib/modules/4.19.190/TFT18_dev.ko");
@@ -104,6 +111,7 @@ int main()
 
     std::signal(SIGINT, onSigInt);
 
+    // -------------------- 业务模块初始化 --------------------
     // 打开摄像头（只负责图像采集与处理）
     Camera cam(0);
     if (!cam.open())
@@ -132,6 +140,7 @@ int main()
     Camera::TrackElementResult trackResult;
     int frameCount = 0;  // 预留给 VOFA 调试发送节流
 
+    // -------------------- 主循环 --------------------
     // 主循环：在 main 中同时调用 camera 和 display；Ctrl+C 后也会退出
     while (cam.isOpened() && !g_exitRequested)
     {
@@ -152,6 +161,7 @@ int main()
         (void)frameCount;
     }
 
+    // -------------------- 退出清理 --------------------
     g_exitRequested = 1;
     JoinThread(imuThread);
     JoinThread(motorThread);

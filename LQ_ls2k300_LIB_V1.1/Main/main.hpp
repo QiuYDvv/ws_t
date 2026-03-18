@@ -16,6 +16,10 @@
 QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ*/
 #pragma once
 
+// 工程公共平台头：
+// 集中包含当前主程序会直接依赖的标准库、系统头、OpenCV 与龙邱库头文件。
+// 该文件偏“总入口”，适合平台初始化或兼容旧工程；新业务文件可按需只包含自己需要的头。
+
 //////////////// C++标准库 //////////////////////////////
 #include <iostream>
 #include <string>

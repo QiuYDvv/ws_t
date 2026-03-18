@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+// 显示模块公共接口：
+// 为业务层提供最小化的 TFT 操作封装，隔离底层龙邱 TFT 驱动细节。
+
 // 前向声明，避免 displayer 与 camera 互相包含
 class Camera;
 

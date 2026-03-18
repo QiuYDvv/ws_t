@@ -3,6 +3,9 @@
  */
 #pragma once
 
+// 电机控制模块公共接口：
+// 暴露 PWM/方向控制、编码器读取和闭环 PID 速度控制能力，供调试线程或后续业务控制层调用。
+
 #include "LQ_PWM.hpp"
 #include "LQ_HW_GPIO.hpp"
 #include "LQ_PWM_ENCODER.hpp"

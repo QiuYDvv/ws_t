@@ -10,6 +10,8 @@ constexpr int MotorController::DEFAULT_MAX_DUTY;
 
 namespace {
 
+// 方向/接线适配常量：
+// 用于把“逻辑速度方向”映射到当前实际硬件接线方向，减少业务层关心接线差异。
 // 电机/编码器软件校准：
 // 1. 左电机实际方向与逻辑命令相反，因此对左电机输出取反；
 // 2. 如有接线换边，可打开左右输出交换；
@@ -36,6 +38,7 @@ constexpr float kFilteredSpeedSnapEpsilon = 0.2f;
 
 } // namespace
 
+// 构造时完成底层外设对象、PID 初值和各种限幅参数初始化。
 MotorController::MotorController()
     : leftPWM_(PWM1, DEFAULT_PWM_CYCLE, 0, "inversed")
     , rightPWM_(PWM2, DEFAULT_PWM_CYCLE, 0, "inversed")
@@ -75,21 +78,25 @@ void MotorController::init()
     inited_ = true;
 }
 
+// 对外部给定的占空比上限做约束，避免超过 PWM 周期。
 void MotorController::setMaxDuty(int maxDuty)
 {
     maxDuty_ = std::max(0, std::min(maxDuty, DEFAULT_PWM_CYCLE));
 }
 
+// 对外部给定的速度百分比上限做约束。
 void MotorController::setMaxOutput(int maxOutput)
 {
     maxOutput_ = std::max(1, std::min(100, maxOutput));
 }
 
+// 斜坡限制越小，输出变化越柔和；越大，则响应更快。
 void MotorController::setRampStep(int rampStep)
 {
     rampStep_ = std::max(1, std::min(100, rampStep));
 }
 
+// 将目标输出按“斜坡 + 换向先回零”策略收敛到当前输出，减少机械和电气冲击。
 float MotorController::rampOutputToward(float targetSpeed, float currentSpeed) const
 {
     const float maxOutput = static_cast<float>(maxOutput_);
@@ -115,6 +122,7 @@ float MotorController::rampOutputToward(float targetSpeed, float currentSpeed) c
                : nextSpeed;
 }
 
+// 将单个电机的逻辑速度换算为方向引脚和占空比，并返回真实下发后的速度近似值。
 float MotorController::setOneMotor(SetPWM& pwm, HWGpio& dir, float speed, int& lastAppliedDuty)
 {
     const float maxOutput = static_cast<float>(maxOutput_);
@@ -143,6 +151,7 @@ float MotorController::setOneMotor(SetPWM& pwm, HWGpio& dir, float speed, int& l
     return speed >= 0.0f ? appliedSpeed : -appliedSpeed;
 }
 
+// 将左右轮逻辑速度统一映射到物理 PWM/方向口，兼容接线符号与左右通道交换。
 void MotorController::applyRawSpeed(float left, float right)
 {
     const float leftOutput = ApplyMotorOutputSign(left, kLeftMotorOutputSign);
@@ -163,6 +172,7 @@ void MotorController::applyRawSpeed(float left, float right)
     appliedOutputRight_ = ApplyMotorOutputSign(appliedRightPhysical, kRightMotorOutputSign);
 }
 
+// 开环速度接口：直接按百分比输出，不使用编码器闭环。
 void MotorController::setSpeed(int left, int right)
 {
     currentOutputLeft_ = static_cast<float>(std::max(-maxOutput_, std::min(maxOutput_, left)));
@@ -170,12 +180,14 @@ void MotorController::setSpeed(int left, int right)
     applyRawSpeed(currentOutputLeft_, currentOutputRight_);
 }
 
+// 停止时同时清目标和 PID 累积状态，避免再次启动时带旧积分。
 void MotorController::stop()
 {
     resetPIDState();
     setSpeed(0, 0);
 }
 
+// 清理 PID 积分、误差和目标速度缓存。
 void MotorController::resetPIDState()
 {
     targetLeft_ = 0.0f;
@@ -186,6 +198,7 @@ void MotorController::resetPIDState()
     lastErrorRight_ = 0.0f;
 }
 
+// 关闭 PWM 输出并撤销导出，通常用于程序退出时的硬件清理。
 void MotorController::shutdown()
 {
     stop();
@@ -203,6 +216,7 @@ void MotorController::shutdown()
 // 超过此阈值视为无效（静止/无脉冲），按 0 处理，避免一上电就全速
 static constexpr float ENCODER_SPEED_INVALID_THRESHOLD = 2000.0f;
 
+// 左右轮编码器读取接口内部都会走统一的滤波逻辑。
 float MotorController::getEncoderSpeedLeft()
 {
     return readFilteredEncoderSpeed(leftEncoder_, kLeftEncoderSign, lastMeasuredLeft_);
@@ -225,6 +239,7 @@ void MotorController::getLastMeasuredSpeed(float& out_left, float& out_right) co
     out_right = lastMeasuredRight_;
 }
 
+// 编码器原始测速会有跳变和无脉冲异常值，这里统一做合法性过滤与一阶低通。
 float MotorController::readFilteredEncoderSpeed(LS_PwmEncoder& encoder, float sign, float& lastMeasured)
 {
     float v = ApplyEncoderSign(encoder.Update(), sign);
@@ -244,6 +259,7 @@ void MotorController::getAppliedOutput(float& out_left, float& out_right) const
     out_right = appliedOutputRight_;
 }
 
+// 设置 PID 时支持“共用一组参数”或“左右独立参数”两种模式。
 void MotorController::setPID(float kp, float ki, float kd)
 {
     kpL_ = kpR_ = kp;
@@ -283,6 +299,7 @@ void MotorController::setTargetSpeed(float target_left, float target_right)
     targetRight_ = target_right;
 }
 
+// 单轮 PID 计算：误差、积分、微分和输出限幅都在这里完成。
 void MotorController::updateOnePID(float target, float actual, double dt,
                                    float kp, float ki, float kd,
                                    float& integral, float& lastError, float& outSpeed)
@@ -300,6 +317,7 @@ void MotorController::updateOnePID(float target, float actual, double dt,
     outSpeed = std::max(-maxOutput, std::min(maxOutput, out));
 }
 
+// 闭环主入口：读取编码器、计算 PID、做斜坡限制，再把结果下发给电机。
 void MotorController::updateClosedLoop(double dt)
 {
     float actualLeft  = getEncoderSpeedLeft();

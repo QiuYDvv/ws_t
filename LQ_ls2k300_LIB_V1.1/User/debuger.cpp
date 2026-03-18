@@ -1,3 +1,5 @@
+// 调试模块实现：
+// 负责上位机串口命令解析、电机测试线程、VOFA 数据发送以及终端/TFT 调试输出。
 #include "debuger.h"
 #include "controller.hpp"
 #include "imu.h"
@@ -13,6 +15,8 @@
 
 namespace {
 
+// 调试线程运行参数：
+// 控制命令轮询周期、电机控制周期、遥测发送节流和堵转保护阈值。
 constexpr double kControlPeriodSec = 0.01;
 constexpr auto kControlPeriod = std::chrono::milliseconds(10);
 constexpr int kCommandPollTimeoutMs = 20;
@@ -33,6 +37,8 @@ constexpr float kStopTargetEpsilon = 1e-3f;
 
 static std::mutex g_serialTxMutex;
 
+// 调试模块共享状态：
+// 命令接收线程修改，电机控制线程读取，因此统一受 mtx 保护。
 struct SharedDebuggerState {
     std::mutex mtx;
     bool running = false;
@@ -64,11 +70,13 @@ struct ControlSnapshot {
 
 static SharedDebuggerState g_sharedState;
 
+// 判断当前目标速度是否可视为“停车”命令。
 static bool IsStopTarget(float left, float right)
 {
     return std::fabs(left) < kStopTargetEpsilon && std::fabs(right) < kStopTargetEpsilon;
 }
 
+// 恢复调试模块到开机默认状态。
 static void ResetSharedState()
 {
     std::lock_guard<std::mutex> lock(g_sharedState.mtx);
@@ -85,6 +93,7 @@ static void ResetSharedState()
     g_sharedState.kdR = 0.0f;
 }
 
+// 将共享状态复制为当前控制线程可安全使用的一份快照，减少持锁时间。
 static ControlSnapshot SnapshotSharedState()
 {
     std::lock_guard<std::mutex> lock(g_sharedState.mtx);
@@ -103,6 +112,7 @@ static ControlSnapshot SnapshotSharedState()
     return snapshot;
 }
 
+// 停车命令只清运行态与目标值，不把其视为故障。
 static void ApplyStopCommandLocked()
 {
     g_sharedState.running = false;
@@ -111,12 +121,14 @@ static void ApplyStopCommandLocked()
     g_sharedState.manualTargetR = 0.0f;
 }
 
+// 故障停车在普通停车基础上额外置 faultActive，提示控制线程保持停机。
 static void LatchFaultStopLocked()
 {
     ApplyStopCommandLocked();
     g_sharedState.faultActive = true;
 }
 
+// 将当前目标模式映射为便于打印的简短状态字符串。
 static const char* DescribeMotorMotion(const ControlSnapshot& snapshot)
 {
     if (snapshot.faultActive)
@@ -140,6 +152,8 @@ static const char* DescribeMotorMotion(const ControlSnapshot& snapshot)
     return "differential";
 }
 
+// 解析上位机命令：
+// P/L/R 调 PID，S 设置手动目标，G 开正弦目标，X/STOP 停车。
 static void HandleCommandLine(const char* line)
 {
     if (!line || line[0] == '\0')
@@ -242,6 +256,7 @@ static void HandleCommandLine(const char* line)
     }
 }
 
+// 串口遥测发送节流，避免 10ms 控制周期下把串口打满。
 static void MaybeSendSpeedTelemetry(Serial* serial, int& telemetryCounter,
                                     float targetLeft, float targetRight,
                                     float actualLeft, float actualRight,
@@ -258,6 +273,8 @@ static void MaybeSendSpeedTelemetry(Serial* serial, int& telemetryCounter,
     DebuggerSendSpeedToHost(*serial, targetLeft, targetRight, actualLeft, actualRight, pwmLeft, pwmRight);
 }
 
+// 命令接收线程：
+// 按行接收串口命令；若一行长时间未收到换行，则按超时自动提交。
 static void CommandReceiverThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 {
     if (!serial || !serial->isOpen())
@@ -319,6 +336,8 @@ static void CommandReceiverThread(Serial* serial, volatile sig_atomic_t* exitFla
     }
 }
 
+// 电机控制线程：
+// 周期读取共享状态，更新目标速度/PID，执行闭环控制并回传遥测。
 static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 {
     MotorController* motor = new MotorController();
@@ -354,6 +373,7 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
             snapshot.kpL != appliedKpL || snapshot.kiL != appliedKiL || snapshot.kdL != appliedKdL ||
             snapshot.kpR != appliedKpR || snapshot.kiR != appliedKiR || snapshot.kdR != appliedKdR)
         {
+            // 仅在参数变化时刷新 PID，避免每个周期重复写入。
             motor->setPID(snapshot.kpL, snapshot.kiL, snapshot.kdL,
                           snapshot.kpR, snapshot.kiR, snapshot.kdR);
             appliedKpL = snapshot.kpL;
@@ -424,6 +444,7 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
             if (!wasRunning || !wasSineTarget)
                 sineStart = now;
 
+            // 正弦模式用于现场快速验证闭环跟踪、换向和编码器反馈。
             const double t = std::chrono::duration<double>(now - sineStart).count();
             const float target = static_cast<float>(kSineAmplitude * std::sin(kTwoPi * kSineFreqHz * t));
             snapshot.targetL = target;
@@ -492,6 +513,7 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 
 } // namespace
 
+// 对串口发送统一加锁，避免命令回显、VOFA 和文本输出互相穿插。
 void DebuggerSendStr(Serial& serial, const char* str)
 {
     if (!str)
@@ -500,6 +522,7 @@ void DebuggerSendStr(Serial& serial, const char* str)
     serial.sendStr(str);
 }
 
+// 将收到的一行命令回显给上位机，方便确认解析前的原始输入。
 void DebuggerEchoCommand(Serial& serial, const char* line)
 {
     if (!line || line[0] == '\0')
@@ -510,6 +533,7 @@ void DebuggerEchoCommand(Serial& serial, const char* line)
     DebuggerSendStr(serial, buf);
 }
 
+// 按固定帧间隔发送 IMU + FPS 四个浮点量到 VOFA。
 void DebuggerSendVofaIfNeeded(Serial& serial, int& frameCount, int period,
                               double fps, const Imu& imu)
 {
@@ -525,6 +549,7 @@ void DebuggerSendVofaIfNeeded(Serial& serial, int& frameCount, int period,
     serial.sendVofaJustFloat(vofa, 4);
 }
 
+// 发送速度闭环关键量，便于上位机做目标/反馈对比曲线。
 void DebuggerSendSpeedToHost(Serial& serial,
                              float targetLeft, float targetRight,
                              float actualLeft, float actualRight,
@@ -537,6 +562,7 @@ void DebuggerSendSpeedToHost(Serial& serial,
     serial.sendVofaJustFloat(vofa, 4);
 }
 
+// 对外统一启动两个后台线程，并在启动前重置共享状态。
 void StartDebuggerThreads(Serial& serial, volatile sig_atomic_t* exitFlag,
                           std::thread* outCmdThread, std::thread* outMotorThread)
 {
@@ -551,6 +577,7 @@ void StartDebuggerThreads(Serial& serial, volatile sig_atomic_t* exitFlag,
         *outMotorThread = std::thread(MotorControlThread, &serial, exitFlag);
 }
 
+// 仅当 PID 参数相对上次发生变化时打印，减少终端刷屏。
 void DebuggerPrintPidIfChanged()
 {
     const ControlSnapshot snapshot = SnapshotSharedState();
@@ -594,6 +621,7 @@ void DebuggerPrintPidIfChanged()
     lastKdR = snapshot.kdR;
 }
 
+// 仅在运行模式或目标速度变化时打印电机状态，便于跟踪命令切换。
 void DebuggerPrintMotorStateIfChanged()
 {
     const ControlSnapshot snapshot = SnapshotSharedState();
@@ -643,6 +671,7 @@ void DebuggerPrintMotorStateIfChanged()
     lastTargetR = snapshot.targetR;
 }
 
+// 若 IMU 已初始化，则在 TFT 上显示当前姿态角。
 void DebuggerDisplayImu(const Imu& imu, uint8_t row, uint8_t col)
 {
     if (imu.isInited())

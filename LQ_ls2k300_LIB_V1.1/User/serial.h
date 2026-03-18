@@ -5,6 +5,9 @@
 #include <string>
 #include <termios.h>
 
+// 串口模块公共接口：
+// 负责对龙邱串口对象做 RAII 封装，并提供文本、原始字节和 VOFA 浮点帧发送接口。
+
 // 前向声明，避免 serial.cpp 外暴露龙邱头文件
 struct LS_UART;
 
