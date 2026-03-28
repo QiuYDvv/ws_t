@@ -5,6 +5,37 @@
 #include "LQ_TFT18_dri.hpp"
 #include <cstdio>
 
+namespace {
+
+inline uint16_t Gray8ToRgb565(uint8_t gray)
+{
+    uint16_t color = (gray >> 3) << 11;
+    color |= (gray >> 2) << 5;
+    color |= gray >> 3;
+    return color;
+}
+
+inline uint8_t SanitizeAscii(unsigned char c)
+{
+    if (c < 32 || c > 126)
+        return static_cast<uint8_t>('?');
+    return static_cast<uint8_t>(c);
+}
+
+// 6x8 字体字符串输出：只改显存，不 flush
+void TFT_P6X8Str_NoFlush(uint8_t x, uint8_t y, const char* s_dat, uint16_t word_color, uint16_t back_color)
+{
+    if (!s_dat)
+        return;
+    while (*s_dat)
+    {
+        const unsigned char raw = static_cast<unsigned char>(*s_dat++);
+        TFTSPI_dir_P6X8(x++, y, SanitizeAscii(raw), word_color, back_color);
+    }
+}
+
+} // namespace
+
 // 初始化 TFT，type = 0 横屏，1 竖屏
 void TFT_DisplayerInit(uint8_t type)
 {
@@ -30,6 +61,25 @@ void TFT_ShowFullGray8(const uint8_t* gray)
 
     // 直接使用库提供的灰度显示接口
     TFTSPI_dir_road(0, 0, TFT18H, TFT18W, (uint8_t*)gray);
+}
+
+void TFT_ShowFullGray8_NoFlush(const uint8_t* gray)
+{
+    if (gray == nullptr)
+        return;
+
+    // 与 TFTSPI_dir_road 同逻辑，但把 flush 推迟到调用方统一执行。
+    const uint8_t w = TFT18W;
+    const uint8_t h = TFT18H;
+    for (uint8_t y = 0; y < h; y++)
+    {
+        const uint32_t rowBase = static_cast<uint32_t>(y) * static_cast<uint32_t>(w);
+        for (uint8_t x = 0; x < w; x++)
+        {
+            const uint8_t g = gray[rowBase + x];
+            TFTSPI_dri_data_mod(x, y, Gray8ToRgb565(g));
+        }
+    }
 }
 
 void TFT_ShowFullRGB565(const uint16_t* rgb565)
@@ -69,6 +119,13 @@ void TFT_ShowTextTopLeft(const char* text)
     TFTSPI_dir_P6X8Str(0, 1, text, u16YELLOW, u16BLACK);
 }
 
+void TFT_ShowTextTopLeft_NoFlush(const char* text)
+{
+    if (text == nullptr)
+        return;
+    TFT_P6X8Str_NoFlush(0, 1, text, u16YELLOW, u16BLACK);
+}
+
 void TFT_ShowTextBottomLeft(const char* text, uint8_t lineFromBottom)
 {
     if (text == nullptr)
@@ -86,11 +143,36 @@ void TFT_ShowTextBottomLeft(const char* text, uint8_t lineFromBottom)
     TFTSPI_dir_P6X8Str(0, y, text, u16YELLOW, u16BLACK);
 }
 
+void TFT_ShowTextBottomLeft_NoFlush(const char* text, uint8_t lineFromBottom)
+{
+    if (text == nullptr)
+        return;
+
+    const uint8_t textRows = static_cast<uint8_t>(TFT18H / 8);
+    if (textRows == 0)
+        return;
+
+    uint8_t y = static_cast<uint8_t>(textRows - 1);
+    if (lineFromBottom < textRows)
+        y = static_cast<uint8_t>(textRows - 1 - lineFromBottom);
+
+    TFT_P6X8Str_NoFlush(0, y, text, u16YELLOW, u16BLACK);
+}
+
 double TFT_UpdateAndShowFps(Camera& cam)
 {
     double fps = cam.updateFps();
     char buf[32];
     std::snprintf(buf, sizeof(buf), "FPS: %.1f", fps);
     TFT_ShowTextTopLeft(buf);
+    return fps;
+}
+
+double TFT_UpdateAndShowFps_NoFlush(Camera& cam)
+{
+    double fps = cam.updateFps();
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "FPS: %.1f", fps);
+    TFT_ShowTextTopLeft_NoFlush(buf);
     return fps;
 }

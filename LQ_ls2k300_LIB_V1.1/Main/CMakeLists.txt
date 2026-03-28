@@ -13,6 +13,10 @@ set(CMAKE_CXX_COMPILER ${CROSS_COMPILER_DIR}/bin/loongarch64-linux-gnu-g++)
 # 项目名称
 project(main)
 
+# -------------------- 调试/性能开关 --------------------
+# 打开后会在串口/终端输出每线程 CPU% 与每周期耗时统计（默认 1s 一次）
+option(LQ_PROFILE_THREADS "Enable per-thread timing logs" ON)
+
 # -------------------- 源文件收集 --------------------
 # 指定所用的源文件路径
 aux_source_directory(${PROJECT_SOURCE_DIR}/ SRC)
@@ -50,6 +54,13 @@ find_library(OPENCV_IMGCODECS opencv_imgcodecs PATHS /home/qyd/work/opencv-4.10.
 # -------------------- 目标与链接 --------------------
 # 由源文件生成一个可执行程序
 add_executable(main ${SRC})
+
+# 编译宏：线程耗时统计开关
+if (LQ_PROFILE_THREADS)
+    target_compile_definitions(main PRIVATE LQ_PROFILE_THREADS=1)
+else()
+    target_compile_definitions(main PRIVATE LQ_PROFILE_THREADS=0)
+endif()
 
 # 连接OpenCV动态库
 target_link_libraries(main PUBLIC ${OPENCV_CORE} ${OPENCV_IMGPROC} ${OPENCV_HIGHGUI} ${OPENCV_VIDEOIO} ${OPENCV_IMGCODECS})

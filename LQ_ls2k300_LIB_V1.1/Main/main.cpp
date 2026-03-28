@@ -23,6 +23,7 @@ QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
 #include "displayer.h"
 #include "imu.h"
 #include "serial.h"
+#include "thread_timing.hpp"
 #include <termios.h>
 #include <csignal>
 #include <chrono>
@@ -49,15 +50,29 @@ static void ImuUpdateThread(Imu* imu, volatile sig_atomic_t* exitFlag)
     if (!imu || !exitFlag)
         return;
 
-    const std::chrono::microseconds period(2000); // 500Hz 解算线程
+    lq::SetThisThreadName("imu");
+    lq::ThreadTiming timing("imu");
+
+    const std::chrono::microseconds period(5000); // 200Hz 解算线程（LoongOS 下更稳）
     std::chrono::steady_clock::time_point nextWake = std::chrono::steady_clock::now();
 
     while (!(*exitFlag))
     {
+        const auto loopStart = std::chrono::steady_clock::now();
         if (imu->isInited())
             imu->update();
+        const auto afterWork = std::chrono::steady_clock::now();
 
         nextWake += period;
+
+        const auto workNs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(afterWork - loopStart).count());
+        const bool overrun = afterWork > nextWake;
+        timing.RecordWork(workNs, overrun);
+        lq::ThreadTimingReport report;
+        if (timing.TryMakeReport(&report))
+            lq::PrintThreadTimingLine(timing.name(), report);
+
         const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
         if (nextWake > now)
             std::this_thread::sleep_until(nextWake);
@@ -99,6 +114,8 @@ static void LoadKernelModuleIfNeeded(const char* moduleName, const char* moduleP
 
 int main()
 {
+    lq::SetThisThreadName("main");
+
     // -------------------- 平台初始化 --------------------
     // 加载所需内核模块
     LoadKernelModuleIfNeeded("TFT18_dri", "/lib/modules/4.19.190/TFT18_dri.ko");
@@ -140,10 +157,21 @@ int main()
     Camera::TrackElementResult trackResult;
     int frameCount = 0;  // 预留给 VOFA 调试发送节流
 
+    lq::ThreadTiming mainTiming("main");
+    double lastFps = 0.0;
+
+#if LQ_PROFILE_THREADS
+    uint64_t tftLastReportNs = lq::NowWallNs();
+    uint64_t tftFrames = 0;
+    uint64_t tftFlushSumNs = 0;
+    uint64_t tftFlushMaxNs = 0;
+#endif
+
     // -------------------- 主循环 --------------------
     // 主循环：在 main 中同时调用 camera 和 display；Ctrl+C 后也会退出
     while (cam.isOpened() && !g_exitRequested)
     {
+        const auto loopStart = std::chrono::steady_clock::now();
         if (!cam.grabProcessAndDisplayFrame(gray, binFull, lineResult, trackResult, tft_w, tft_h, 0))
             break;
 
@@ -153,12 +181,53 @@ int main()
         DebuggerPrintMotorStateIfChanged();
 
         // 计算帧率并显示在屏幕左上角
-        double fps = TFT_UpdateAndShowFps(cam);
-        (void)fps;
+        lastFps = TFT_UpdateAndShowFps_NoFlush(cam);
+
+        // 合并一帧内所有绘制，只 flush 一次（灰度图/线条/元素/FPS/IMU）。
+#if LQ_PROFILE_THREADS
+        const uint64_t flushStart = lq::NowWallNs();
+#endif
+        TFT_Flush();
+#if LQ_PROFILE_THREADS
+        const uint64_t flushEnd = lq::NowWallNs();
+        if (flushStart && flushEnd && flushEnd >= flushStart)
+        {
+            const uint64_t flushNs = flushEnd - flushStart;
+            tftFlushSumNs += flushNs;
+            if (flushNs > tftFlushMaxNs)
+                tftFlushMaxNs = flushNs;
+        }
+
+        ++tftFrames;
+        if (tftLastReportNs && flushEnd && flushEnd - tftLastReportNs >= 1000000000ULL && tftFrames)
+        {
+            const double invFrames = 1.0 / static_cast<double>(tftFrames);
+            const double flushAvgMs = (static_cast<double>(tftFlushSumNs) / 1e6) * invFrames;
+            const double flushMaxMs = static_cast<double>(tftFlushMaxNs) / 1e6;
+            std::printf("[stage][tft] flush_avg=%.2fms flush_max=%.2fms\n", flushAvgMs, flushMaxMs);
+            std::fflush(stdout);
+            tftLastReportNs = flushEnd;
+            tftFrames = 0;
+            tftFlushSumNs = 0;
+            tftFlushMaxNs = 0;
+        }
+#endif
 
         // VOFA+ JustFloat：每 period 帧发一帧浮点数据（FPS, R, P, Y）
         // DebuggerSendVofaIfNeeded(serial, frameCount, 15, fps, imu);
         (void)frameCount;
+
+        const auto loopEnd = std::chrono::steady_clock::now();
+        const auto workNs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(loopEnd - loopStart).count());
+        mainTiming.RecordWork(workNs, false);
+        lq::ThreadTimingReport report;
+        if (mainTiming.TryMakeReport(&report))
+        {
+            char extra[64];
+            std::snprintf(extra, sizeof(extra), "fps=%.1f", lastFps);
+            lq::PrintThreadTimingLine(mainTiming.name(), report, extra);
+        }
     }
 
     // -------------------- 退出清理 --------------------

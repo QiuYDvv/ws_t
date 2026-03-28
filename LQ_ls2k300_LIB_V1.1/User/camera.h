@@ -153,8 +153,9 @@ public:
     // binary 为 CV_8UC1，0 黑 255 白；type 0 普通模式，1 斑马线模式（仅起始列不同）
     void searchLineEightNeighbor(const cv::Mat& binary, LineSearchResult& result, int type = 0) const;
 
-    // 使用龙邱库逐点绘制边线到 TFT（左蓝、右绿、中线红），各 3 像素宽，内部会 TFT_Flush
-    void drawLineResultOnTFT(const LineSearchResult& result, int imgW, int imgH) const;
+    // 使用龙邱库逐点绘制边线到 TFT（左蓝、右绿、中线红），各 3 像素宽
+    // flush=true 时内部调用 TFT_Flush；若希望一帧内合并多次绘制，请传 flush=false 并由调用方统一 flush。
+    void drawLineResultOnTFT(const LineSearchResult& result, int imgW, int imgH, bool flush = true) const;
 
     // 赛道元素检测入口：内部先检测斑马线/环岛，并更新结果结构体
     void detectTrackElements(const cv::Mat& binary, LineSearchResult& lineResult,

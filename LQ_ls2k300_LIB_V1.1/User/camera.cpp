@@ -2,6 +2,7 @@
 // 负责图像采集、二值化、八邻域搜线、赛道元素识别/状态机处理，以及补线后的中线/偏差计算。
 #include "camera.h"
 #include "displayer.h"
+#include "thread_timing.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -30,6 +31,93 @@ constexpr double kLegacyOffsetWeights[15] = {
     0.71, 0.65, 0.59, 0.53, 0.47,
     0.47, 0.47, 0.47, 0.47, 0.47
 };
+
+#if LQ_PROFILE_THREADS
+struct StageStat {
+    uint64_t sumNs = 0;
+    uint64_t maxNs = 0;
+    void Add(uint64_t ns)
+    {
+        sumNs += ns;
+        if (ns > maxNs)
+            maxNs = ns;
+    }
+    void Reset()
+    {
+        sumNs = 0;
+        maxNs = 0;
+    }
+};
+
+struct CameraStageProfile {
+    uint64_t lastReportNs = 0;
+    uint64_t frames = 0;
+
+    StageStat capRead;
+    StageStat resizeCvt;
+    StageStat flip;
+    StageStat otsu;
+    StageStat erode;
+    StageStat search;
+    StageStat detect;
+    StageStat center;
+    StageStat tftGray;
+    StageStat tftLines;
+    StageStat tftElem;
+
+    void OnFrameEnd()
+    {
+        ++frames;
+        const uint64_t now = lq::NowWallNs();
+        if (!lastReportNs)
+            lastReportNs = now;
+        if (!now || now - lastReportNs < 1000000000ULL)
+            return;
+        if (frames == 0)
+            return;
+
+        const double invFrames = 1.0 / static_cast<double>(frames);
+        const auto msAvg = [&](const StageStat& s) -> double {
+            return (static_cast<double>(s.sumNs) / 1e6) * invFrames;
+        };
+        const auto msMax = [&](const StageStat& s) -> double {
+            return static_cast<double>(s.maxNs) / 1e6;
+        };
+
+        const double procAvgMs =
+            msAvg(flip) + msAvg(otsu) + msAvg(erode) + msAvg(search) + msAvg(detect) + msAvg(center);
+        const double tftAvgMs = msAvg(tftGray) + msAvg(tftLines) + msAvg(tftElem);
+
+        std::printf("[stage][camera] cap=%.1fms(rc=%.1fms) proc=%.1fms tft=%.1fms (gray=%.1f line=%.1f elem=%.1f) cap_max=%.1fms tft_max=%.1fms\n",
+                    msAvg(capRead),
+                    msAvg(resizeCvt),
+                    procAvgMs,
+                    tftAvgMs,
+                    msAvg(tftGray),
+                    msAvg(tftLines),
+                    msAvg(tftElem),
+                    msMax(capRead),
+                    msMax(tftGray) + msMax(tftLines) + msMax(tftElem));
+        std::fflush(stdout);
+
+        lastReportNs = now;
+        frames = 0;
+        capRead.Reset();
+        resizeCvt.Reset();
+        flip.Reset();
+        otsu.Reset();
+        erode.Reset();
+        search.Reset();
+        detect.Reset();
+        center.Reset();
+        tftGray.Reset();
+        tftLines.Reset();
+        tftElem.Reset();
+    }
+};
+
+static CameraStageProfile g_cameraStageProfile;
+#endif
 
 // -------------------- 通用数学/尺寸辅助函数 --------------------
 int ClampInt(int value, int minValue, int maxValue)
@@ -288,16 +376,31 @@ bool Camera::grabGrayFrame(cv::Mat& gray, int outWidth, int outHeight)
     cv::Mat frame;
     cv::Mat resized;
 
+#if LQ_PROFILE_THREADS
+    const uint64_t t0 = lq::NowWallNs();
+#endif
     if (!cap_.read(frame) || frame.empty())
     {
         std::printf("Read frame failed.\n");
         return false;
     }
+#if LQ_PROFILE_THREADS
+    const uint64_t t1 = lq::NowWallNs();
+#endif
 
     // 缩放到指定分辨率
     cv::resize(frame, resized, cv::Size(outWidth, outHeight));
     // 转为灰度图（只负责图像处理，不负责显示）
     cv::cvtColor(resized, gray, cv::COLOR_BGR2GRAY);
+
+#if LQ_PROFILE_THREADS
+    const uint64_t t2 = lq::NowWallNs();
+    if (t0 && t1 && t2)
+    {
+        g_cameraStageProfile.capRead.Add(t1 - t0);
+        g_cameraStageProfile.resizeCvt.Add(t2 - t1);
+    }
+#endif
 
     return true;
 }
@@ -676,7 +779,7 @@ void Camera::calculateCenterLineWithSupplement(LineSearchResult& result, int img
 }
 
 // TFT 绘制也优先显示补线结果，便于现场直接看到状态机修改后的边线。
-void Camera::drawLineResultOnTFT(const LineSearchResult& result, int imgW, int imgH) const
+void Camera::drawLineResultOnTFT(const LineSearchResult& result, int imgW, int imgH, bool flush) const
 {
     static constexpr uint16_t RGB565_BLUE  = 0x001F;
     static constexpr uint16_t RGB565_GREEN = 0x07E0;
@@ -715,7 +818,8 @@ void Camera::drawLineResultOnTFT(const LineSearchResult& result, int imgW, int i
             }
         }
     }
-    TFT_Flush();
+    if (flush)
+        TFT_Flush();
 }
 
 // -------------------- 元素检测入口 --------------------
@@ -1693,7 +1797,7 @@ void Camera::drawTrackElementsOnTFT(const TrackElementResult& result) const
         elementName = "Zebra";
 
     std::snprintf(buf, sizeof(buf), "Elem:%-10s", elementName);
-    TFT_ShowTextBottomLeft(buf, 0);
+    TFT_ShowTextBottomLeft_NoFlush(buf, 0);
 }
 
 // 清理上一阶段生成的补线，让 neo 数组重新与原始搜线结果同步。
@@ -2869,15 +2973,73 @@ bool Camera::grabProcessAndDisplayFrame(cv::Mat& gray, cv::Mat& binary, LineSear
 {
     if (!grabGrayFrame(gray, outWidth, outHeight))
         return false;
+
+#if LQ_PROFILE_THREADS
+    uint64_t t = lq::NowWallNs();
+#endif
     flipVertical(gray, gray);
+#if LQ_PROFILE_THREADS
+    uint64_t tFlip = lq::NowWallNs();
+    if (t && tFlip)
+        g_cameraStageProfile.flip.Add(tFlip - t);
+    t = tFlip;
+#endif
     otsuBinarize(gray, binary);
+#if LQ_PROFILE_THREADS
+    uint64_t tOtsu = lq::NowWallNs();
+    if (t && tOtsu)
+        g_cameraStageProfile.otsu.Add(tOtsu - t);
+    t = tOtsu;
+#endif
     pixelFilterErode(binary);
+#if LQ_PROFILE_THREADS
+    uint64_t tErode = lq::NowWallNs();
+    if (t && tErode)
+        g_cameraStageProfile.erode.Add(tErode - t);
+    t = tErode;
+#endif
     searchLineEightNeighbor(binary, lineResult, searchType);
+#if LQ_PROFILE_THREADS
+    uint64_t tSearch = lq::NowWallNs();
+    if (t && tSearch)
+        g_cameraStageProfile.search.Add(tSearch - t);
+    t = tSearch;
+#endif
     initializeLineTool(lineResult, outWidth, outHeight);
     detectTrackElements(binary, lineResult, trackResult);
+#if LQ_PROFILE_THREADS
+    uint64_t tDetect = lq::NowWallNs();
+    if (t && tDetect)
+        g_cameraStageProfile.detect.Add(tDetect - t);
+    t = tDetect;
+#endif
     calculateCenterLine(lineResult, outWidth, outHeight);
-    TFT_ShowFullGray8(binary.data);
-    drawLineResultOnTFT(lineResult, outWidth, outHeight);
+#if LQ_PROFILE_THREADS
+    uint64_t tCenter = lq::NowWallNs();
+    if (t && tCenter)
+        g_cameraStageProfile.center.Add(tCenter - t);
+    t = tCenter;
+#endif
+    TFT_ShowFullGray8_NoFlush(binary.data);
+#if LQ_PROFILE_THREADS
+    uint64_t tGray = lq::NowWallNs();
+    if (t && tGray)
+        g_cameraStageProfile.tftGray.Add(tGray - t);
+    t = tGray;
+#endif
+    drawLineResultOnTFT(lineResult, outWidth, outHeight, false);
+#if LQ_PROFILE_THREADS
+    uint64_t tLines = lq::NowWallNs();
+    if (t && tLines)
+        g_cameraStageProfile.tftLines.Add(tLines - t);
+    t = tLines;
+#endif
     drawTrackElementsOnTFT(trackResult);
+#if LQ_PROFILE_THREADS
+    uint64_t tElem = lq::NowWallNs();
+    if (t && tElem)
+        g_cameraStageProfile.tftElem.Add(tElem - t);
+    g_cameraStageProfile.OnFrameEnd();
+#endif
     return true;
 }

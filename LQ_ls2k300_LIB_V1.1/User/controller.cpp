@@ -16,7 +16,7 @@ namespace {
 // 1. 左电机实际方向与逻辑命令相反，因此对左电机输出取反；
 // 2. 如有接线换边，可打开左右输出交换；
 // 3. 编码器符号保持与逻辑速度同向。
-constexpr int kLeftMotorOutputSign = -1;
+constexpr int kLeftMotorOutputSign = 1;
 constexpr int kRightMotorOutputSign = 1;
 constexpr bool kSwapMotorOutputChannels = false;
 constexpr float kLeftEncoderSign = 1.0f;
@@ -48,7 +48,7 @@ MotorController::MotorController()
     , rightEncoder_(3, 72)           // 右编码器：PWM 通道 3，方向 GPIO72
     , maxDuty_(DEFAULT_MAX_DUTY)
     , minStartDuty_(1)
-    , maxOutput_(100)                // 速度输出限幅，默认 ±100
+    , maxOutput_(50)                // 速度输出限幅，默认 ±100
     , rampStep_(6)                   // 10ms 控制周期下每拍最多变化 6%，约 170ms 从 0 到满量程
     , inited_(false)
     , speedFilterAlpha_(0.25f)       // 一阶低通，抑制低速瞬时测速跳变
@@ -309,7 +309,7 @@ void MotorController::updateOnePID(float target, float actual, double dt,
     float derivative = (dt > 1e-9f) ? static_cast<float>((error - lastError) / dt) : 0.0f;
     lastError = error;
 
-    const float maxIntegral = 100.0f;
+    const float maxIntegral = 20.0f;
     integral = std::max(-maxIntegral, std::min(maxIntegral, integral));
 
     float out = kp * error + ki * integral + kd * derivative;

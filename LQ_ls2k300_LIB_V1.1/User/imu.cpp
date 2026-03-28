@@ -346,9 +346,28 @@ double Imu::wrapAngleDeg(double angleDeg)
 // 以 6x8 字体将当前姿态角打印到 TFT，便于现场快速确认解算输出。
 void Imu::displayAttitude(uint8_t row, uint8_t col) const
 {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    double roll = 0.0;
+    double pitch = 0.0;
+    double yaw = 0.0;
+    {
+        // 注意：TFT SPI 输出本身可能较慢，不能持锁执行，否则会阻塞 500Hz 的更新线程。
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        roll = rollDeg_;
+        pitch = pitchDeg_;
+        yaw = yawDeg_;
+    }
     char buf[40];
     std::snprintf(buf, sizeof(buf), "R:%5.1f P:%5.1f Y:%5.1f",
-                  rollDeg_, pitchDeg_, yawDeg_);
-    TFTSPI_dir_P6X8Str(row, col, buf, u16WHITE, u16BLACK);
+                  roll, pitch, yaw);
+    // 注意：TFTSPI_dir_P6X8Str 内部会 flush；这里避免每次显示都 flush，
+    // 由主循环统一在一帧末尾 flush（减少一次帧内多次 IOCTL_TFT_FLUSH 的开销）。
+    uint8_t x = row;
+    const uint8_t y = col;
+    for (const char* p = buf; *p; ++p)
+    {
+        unsigned char c = static_cast<unsigned char>(*p);
+        if (c < 32 || c > 126)
+            c = '?';
+        TFTSPI_dir_P6X8(x++, y, static_cast<uint8_t>(c), u16WHITE, u16BLACK);
+    }
 }

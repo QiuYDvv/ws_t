@@ -4,6 +4,7 @@
 #include "controller.hpp"
 #include "imu.h"
 #include "serial.h"
+#include "thread_timing.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -17,11 +18,14 @@ namespace {
 
 // 调试线程运行参数：
 // 控制命令轮询周期、电机控制周期、遥测发送节流和堵转保护阈值。
+// 说明：在 LoongOS 上，10ms 的 sleep_until 往往跑不满 100Hz，实际会落在 ~60Hz 左右；
+// 这里保持“期望 100Hz”的 10ms 周期，但 PID 的 dt 使用实际测量值（见 MotorControlThread），
+// 因此即便实际频率偏低，也能按真实 dt 计算积分/微分项。
 constexpr double kControlPeriodSec = 0.01;
 constexpr auto kControlPeriod = std::chrono::milliseconds(10);
 constexpr int kCommandPollTimeoutMs = 20;
 constexpr int kCommandFlushTimeoutMs = 100;
-constexpr int kTelemetryDivider = 2;
+constexpr int kTelemetryDivider = 1;
 constexpr int kOutputRampStep = 6;
 // 先关闭堵转保护，便于现场继续联调；后续确认阈值后再打开。
 constexpr bool kEnableStallProtection = false;
@@ -280,13 +284,21 @@ static void CommandReceiverThread(Serial* serial, volatile sig_atomic_t* exitFla
     if (!serial || !serial->isOpen())
         return;
 
+    lq::SetThisThreadName("cmd");
+    lq::ThreadTiming timing("cmd");
+    uint64_t bytesInInterval = 0;
+    uint64_t linesInInterval = 0;
+
     char lineBuf[128];
     size_t lineLen = 0;
     int idleWaitMs = 0;
 
     while (exitFlag && !*exitFlag)
     {
-        if (!serial->waitReadable(kCommandPollTimeoutMs))
+        const bool readable = serial->waitReadable(kCommandPollTimeoutMs);
+        const auto workStart = std::chrono::steady_clock::now();
+
+        if (!readable)
         {
             if (lineLen > 0)
             {
@@ -296,42 +308,63 @@ static void CommandReceiverThread(Serial* serial, volatile sig_atomic_t* exitFla
                     lineBuf[lineLen] = '\0';
                     DebuggerEchoCommand(*serial, lineBuf);
                     HandleCommandLine(lineBuf);
+                    ++linesInInterval;
                     lineLen = 0;
                     idleWaitMs = 0;
                 }
             }
-            continue;
+        }
+        else
+        {
+            idleWaitMs = 0;
+            char chunk[32];
+            const int n = serial->receive(chunk, sizeof(chunk));
+            if (n > 0)
+            {
+                bytesInInterval += static_cast<uint64_t>(n);
+                for (int i = 0; i < n; ++i)
+                {
+                    const char ch = chunk[i];
+                    if (ch == '\n' || ch == '\r')
+                    {
+                        lineBuf[lineLen] = '\0';
+                        if (lineLen > 0)
+                        {
+                            DebuggerEchoCommand(*serial, lineBuf);
+                            HandleCommandLine(lineBuf);
+                            ++linesInInterval;
+                        }
+                        lineLen = 0;
+                        idleWaitMs = 0;
+                        continue;
+                    }
+
+                    if (lineLen < sizeof(lineBuf) - 1)
+                        lineBuf[lineLen++] = ch;
+                    else
+                    {
+                        lineLen = 0;
+                        idleWaitMs = 0;
+                    }
+                }
+            }
         }
 
-        idleWaitMs = 0;
-        char chunk[32];
-        const int n = serial->receive(chunk, sizeof(chunk));
-        if (n <= 0)
-            continue;
-
-        for (int i = 0; i < n; ++i)
+        const auto workEnd = std::chrono::steady_clock::now();
+        const auto workNs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(workEnd - workStart).count());
+        timing.RecordWork(workNs, false);
+        lq::ThreadTimingReport report;
+        if (timing.TryMakeReport(&report))
         {
-            const char ch = chunk[i];
-            if (ch == '\n' || ch == '\r')
-            {
-                lineBuf[lineLen] = '\0';
-                if (lineLen > 0)
-                {
-                    DebuggerEchoCommand(*serial, lineBuf);
-                    HandleCommandLine(lineBuf);
-                }
-                lineLen = 0;
-                idleWaitMs = 0;
-                continue;
-            }
-
-            if (lineLen < sizeof(lineBuf) - 1)
-                lineBuf[lineLen++] = ch;
-            else
-            {
-                lineLen = 0;
-                idleWaitMs = 0;
-            }
+            const double invSec = (report.wall_s > 1e-9) ? (1.0 / report.wall_s) : 0.0;
+            char extra[96];
+            std::snprintf(extra, sizeof(extra), "bytes/s=%.0f lines/s=%.1f",
+                          static_cast<double>(bytesInInterval) * invSec,
+                          static_cast<double>(linesInInterval) * invSec);
+            lq::PrintThreadTimingLine(timing.name(), report, extra);
+            bytesInInterval = 0;
+            linesInInterval = 0;
         }
     }
 }
@@ -340,6 +373,9 @@ static void CommandReceiverThread(Serial* serial, volatile sig_atomic_t* exitFla
 // 周期读取共享状态，更新目标速度/PID，执行闭环控制并回传遥测。
 static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 {
+    lq::SetThisThreadName("motor");
+    lq::ThreadTiming timing("motor");
+
     MotorController* motor = new MotorController();
     motor->init();
     motor->setRampStep(kOutputRampStep);
@@ -363,6 +399,9 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
     while (exitFlag && !*exitFlag)
     {
         const auto now = std::chrono::steady_clock::now();
+        const auto cycleStart = now;
+        const auto cycleDeadline = now + kControlPeriod;
+
         double dt = std::chrono::duration<double>(now - lastTick).count();
         lastTick = now;
         if (dt <= 0.0 || dt > 0.1)
@@ -408,6 +447,15 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
             wasFaultActive = true;
             stallCounterLeft = 0;
             stallCounterRight = 0;
+
+            const auto cycleEnd = std::chrono::steady_clock::now();
+            const auto workNs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(cycleEnd - cycleStart).count());
+            timing.RecordWork(workNs, cycleEnd > cycleDeadline);
+            lq::ThreadTimingReport report;
+            if (timing.TryMakeReport(&report))
+                lq::PrintThreadTimingLine(timing.name(), report);
+
             std::this_thread::sleep_until(now + kControlPeriod);
             continue;
         }
@@ -435,6 +483,15 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
             wasSineTarget = false;
             stallCounterLeft = 0;
             stallCounterRight = 0;
+
+            const auto cycleEnd = std::chrono::steady_clock::now();
+            const auto workNs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(cycleEnd - cycleStart).count());
+            timing.RecordWork(workNs, cycleEnd > cycleDeadline);
+            lq::ThreadTimingReport report;
+            if (timing.TryMakeReport(&report))
+                lq::PrintThreadTimingLine(timing.name(), report);
+
             std::this_thread::sleep_until(now + kControlPeriod);
             continue;
         }
@@ -487,6 +544,15 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
                 wasFaultActive = true;
                 stallCounterLeft = 0;
                 stallCounterRight = 0;
+
+                const auto cycleEnd = std::chrono::steady_clock::now();
+                const auto workNs = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(cycleEnd - cycleStart).count());
+                timing.RecordWork(workNs, cycleEnd > cycleDeadline);
+                lq::ThreadTimingReport report;
+                if (timing.TryMakeReport(&report))
+                    lq::PrintThreadTimingLine(timing.name(), report);
+
                 std::this_thread::sleep_until(now + kControlPeriod);
                 continue;
             }
@@ -503,6 +569,15 @@ static void MotorControlThread(Serial* serial, volatile sig_atomic_t* exitFlag)
 
         wasRunning = true;
         wasSineTarget = snapshot.useSineTarget;
+
+        const auto cycleEnd = std::chrono::steady_clock::now();
+        const auto workNs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(cycleEnd - cycleStart).count());
+        timing.RecordWork(workNs, cycleEnd > cycleDeadline);
+        lq::ThreadTimingReport report;
+        if (timing.TryMakeReport(&report))
+            lq::PrintThreadTimingLine(timing.name(), report);
+
         std::this_thread::sleep_until(now + kControlPeriod);
     }
 
